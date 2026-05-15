@@ -1,0 +1,19 @@
+[Unit]
+Description=AGRI-EDGE-IA — Asistente Agrícola Offline (EdgeLLM)
+After=network.target ollama.service
+Requires=ollama.service
+
+[Service]
+Type=simple
+User=agri
+WorkingDirectory=/opt/agri-edge-ia
+ExecStart=/usr/bin/python3 /opt/agri-edge-ia/main.py --modo cli
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONPATH=/opt/agri-edge-ia
+Environment=OLLAMA_HOST=http://localhost:11434
+
+[Install]
+WantedBy=multi-user.target

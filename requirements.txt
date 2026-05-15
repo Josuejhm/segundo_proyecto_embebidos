@@ -1,0 +1,12 @@
+# AGRI-EDGE-IA — Dependencias mínimas
+# Compatible con Python 3.9+ y Jetson Nano (ARM64)
+# NO incluir dependencias que requieran CUDA 11.x
+
+requests>=2.28.0        # HTTP client para API Ollama
+pyyaml>=6.0             # Lectura de configuración
+python-dotenv>=1.0.1    # Variables de entorno
+rich>=13.0.0            # CLI con formato visual
+# SQLite3 viene incluido en Python stdlib
+
+# --- Opcional para pruebas ---
+pytest>=9.0.2

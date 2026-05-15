@@ -1,0 +1,26 @@
+# AGRI-EDGE-IA — Configuración global
+# Modificar según entorno: local → Jetson Nano
+
+ollama:
+  host: "http://localhost:11434"
+  model: "phi3:mini"          # Objetivo: phi3:mini (Q4_K_M). Alternativa liviana: tinyllama
+  timeout: 90                 # segundos; aumentar en Jetson Nano (hasta 180)
+  num_predict: 300            # tokens máximos de respuesta; reducir en Jetson si hay presión RAM
+  temperature: 0.3            # baja para respuestas más deterministas
+
+cultivo:
+  tipo: "papa"
+  variedad: "La Floresta"
+  ubicacion: "Cartago, Costa Rica"
+
+base_datos:
+  path: "data/db/agri_edge.db"
+
+logs:
+  path: "data/agri_edge.log"
+  level: "INFO"               # DEBUG | INFO | WARNING | ERROR
+
+vision:
+  mock_enabled: true          # true = usar mock; false = usar OpenCV real (Fase 3+)
+
+entorno: "local"              # local | jetson
