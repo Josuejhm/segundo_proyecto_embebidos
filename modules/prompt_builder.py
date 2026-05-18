@@ -31,6 +31,7 @@ PROMPT_FILES = {
     "diagnostico_fitosanitario": "diagnostico_fitosanitario.md",
     "riego_fertilizacion": "riego_fertilizacion.md",
     "economia": "economia.md",
+    "consulta_libre": "consulta_libre.md", # modo adicional para preguntas libres del agricultor
 }
 
 # Plantillas inline de respaldo (si no se encuentra el archivo .md)
@@ -70,6 +71,14 @@ PROMPT_FALLBACK = {
         "Luego escribe un resumen corto para el agricultor.\n"
         "Aclara que la recomendación es orientativa y no sustituye a un agrónomo.\n\n"
         "CONTEXTO:\n{contexto_json}"
+    ),
+    "consulta_libre": (                     
+        "You are an offline agricultural assistant for potato farmers in Costa Rica.\n"
+        "Use ONLY the JSON context. Answer in Costa Rican Spanish.\n"
+        "Answer the farmer's question directly. Output JSON first:\n"
+        '{"respuesta":"string","fuentes_usadas":["string"],"nota":"string"}\n'
+        "Then 2 sentences summary.\n\n"
+        "CONTEXT:\n{contexto_json}"
     ),
 }
 

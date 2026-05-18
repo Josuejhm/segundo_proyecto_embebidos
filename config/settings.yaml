@@ -1,26 +1,51 @@
 # AGRI-EDGE-IA — Configuración global
-# Modificar según entorno: local → Jetson Nano
+# Cambiar 'entorno' para activar ajustes específicos: local | jetson
 
+entorno: "local"
+
+# ── Modelo LLM ──────────────────────────────────────────────────────────────
+# CAMBIO: phi3:mini → qwen2.5:3b
+# RAZÓN: qwen2.5:3b alucina mucho menos y sigue instrucciones JSON con precisión.
+# INSTALAR: ollama pull qwen2.5:3b
 ollama:
   host: "http://localhost:11434"
-  model: "phi3:mini"          # Objetivo: phi3:mini (Q4_K_M). Alternativa liviana: tinyllama
-  timeout: 90                 # segundos; aumentar en Jetson Nano (hasta 180)
-  num_predict: 300            # tokens máximos de respuesta; reducir en Jetson si hay presión RAM
-  temperature: 0.3            # baja para respuestas más deterministas
+  model: "qwen2.5:3b"
+  timeout: 150
+  num_predict: 300
+  temperature: 0.1
+  stream: true
 
-cultivo:
-  tipo: "papa"
-  variedad: "La Floresta"
-  ubicacion: "Cartago, Costa Rica"
+# ── Overrides para Jetson Nano ───────────────────────────────────────────────
+# Cuando entorno="jetson", main.py aplica estos valores automáticamente.
+# GPU Maxwell es más lenta → más tiempo y menos tokens para preservar RAM.
+jetson_overrides:
+  timeout: 120
+  num_predict: 200
+  temperature: 0.1
+  stream: true
 
+# ── RAG ─────────────────────────────────────────────────────────────────────
+rag:
+  habilitado: true
+  index_path: "rag/index"
+  model_name: "all-MiniLM-L6-v2"
+  n_resultados: 2
+
+# ── Base de datos ────────────────────────────────────────────────────────────
 base_datos:
   path: "data/db/agri_edge.db"
 
+# ── Cultivo por defecto ──────────────────────────────────────────────────────
+cultivo:
+  tipo: "papa"
+  variedad: "La Floresta"
+  ubicacion: "Tierra Blanca de Cartago, Costa Rica"
+
+# ── Visión ───────────────────────────────────────────────────────────────────
+vision:
+  mock_enabled: true
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
 logs:
   path: "data/agri_edge.log"
-  level: "INFO"               # DEBUG | INFO | WARNING | ERROR
-
-vision:
-  mock_enabled: true          # true = usar mock; false = usar OpenCV real (Fase 3+)
-
-entorno: "local"              # local | jetson
+  level: "INFO"

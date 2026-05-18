@@ -3,17 +3,22 @@ modules/context_builder.py
 --------------------------
 Construye el contexto JSON compacto que se inyecta en cada llamada al LLM.
 
-Regla fundamental:
-  El LLM NUNCA recibe texto libre sin contexto.
-  Todo prompt incluye un contexto JSON generado aquí.
+CAMBIO PRINCIPAL respecto a versión anterior: integración del RAG.
+  Versión anterior: el contexto no tenía información local de Costa Rica.
+  Versión actual:   agrega campo 'contexto_local_cr' con fragmentos
+                    recuperados de los documentos en rag/documentos/.
 
-El contexto incluye SOLO los datos relevantes al modo activo para respetar
-el límite de tokens y la RAM disponible en el Jetson Nano.
+  RAZÓN: qwen2.5:3b (como cualquier modelo pequeño offline) no conoce:
+    - Precios PIMA actuales en colones
+    - Variedades locales de papa (La Floresta)
+    - Productos SENASA autorizados en CR
+    - Condiciones climáticas de Tierra Blanca de Cartago
+  Con el RAG, la aplicación recupera esa información y la inyecta aquí.
 
-Modos soportados:
-  - diagnostico_fitosanitario
-  - riego_fertilizacion
-  - economia
+RESTRICCIÓN JETSON:
+  El contexto total (incluyendo fragmentos RAG) debe mantenerse bajo
+  1500 caracteres para que el prompt no supere ~500 tokens.
+  Más de 500 tokens de entrada → el LLM tarda más de 30s en Jetson.
 """
 
 import json
@@ -22,22 +27,13 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Modos válidos del sistema
 MODOS_VALIDOS = {"diagnostico_fitosanitario", "riego_fertilizacion", "economia"}
+ETAPAS_VALIDAS = {"emergencia", "vegetativo", "tuberizacion", "maduracion"}
 
-# Valores por defecto del cultivo (editables en settings.yaml)
 CULTIVO_DEFAULT = {
     "tipo": "papa",
     "variedad": "La Floresta",
-    "ubicacion": "Cartago, Costa Rica",
-}
-
-# Restricciones de respuesta comunes
-RESTRICCIONES_DEFAULT = {
-    "idioma": "español costarricense claro",
-    "formato": "json_mas_resumen",
-    "max_tokens": 250,
-    "incluir_nota_seguridad": True,
+    "ubicacion": "Tierra Blanca de Cartago, Costa Rica",
 }
 
 
@@ -48,52 +44,42 @@ def build_context(
     vision_result: Optional[dict] = None,
     costos: Optional[dict] = None,
     cultivo_override: Optional[dict] = None,
-    restricciones_override: Optional[dict] = None,
+    rag_fragmentos: Optional[list] = None,
 ) -> dict:
     """
     Construye y valida el contexto JSON para el LLM.
 
     Args:
-        modo: Uno de MODOS_VALIDOS.
-        etapa_fenologica: Estado actual del cultivo (emergencia|vegetativo|tuberizacion|maduracion).
-        suelo: Dict con humedad_pct, ph, nitrogeno, fosforo, potasio.
-        vision_result: Resultado del módulo F2 (real o mock).
-        costos: Dict con costos_operacionales, rendimiento_esperado_kg (para modo economia).
-        cultivo_override: Sobreescribir campos del cultivo por defecto.
-        restricciones_override: Sobreescribir restricciones de respuesta.
+        modo:              Modo activo del sistema.
+        etapa_fenologica:  Estado fenológico del cultivo.
+        suelo:             Dict con humedad_pct, ph, nitrogeno, fosforo, potasio.
+        vision_result:     Resultado del módulo de visión (real o mock).
+        costos:            Dict con datos económicos (modo economia).
+        cultivo_override:  Sobreescribir campos del cultivo por defecto.
+        rag_fragmentos:    Lista de dicts {'fuente':str, 'texto':str}
+                           del RAGRetriever. None = funciona sin RAG.
 
     Returns:
-        Dict con el contexto JSON listo para inyectar en el prompt.
+        Dict con el contexto listo para serializar como JSON.
 
     Raises:
-        ValueError si el modo o etapa no son válidos.
+        ValueError si modo o etapa son inválidos.
     """
-
-    _validar_modo(modo)
-    _validar_etapa(etapa_fenologica)
+    _validar(modo, etapa_fenologica)
 
     cultivo = {**CULTIVO_DEFAULT, "etapa_fenologica": etapa_fenologica}
     if cultivo_override:
         cultivo.update(cultivo_override)
 
-    restricciones = {**RESTRICCIONES_DEFAULT}
-    if restricciones_override:
-        restricciones.update(restricciones_override)
-
     ctx: dict = {
         "modo": modo,
         "cultivo": cultivo,
-        "restricciones_respuesta": restricciones,
     }
 
-    # --- Datos específicos por modo ---
+    # ── Datos específicos por modo ───────────────────────────────────────────
     if modo == "diagnostico_fitosanitario":
         ctx["suelo"] = _normalizar_suelo(suelo)
-        if vision_result:
-            ctx["vision"] = vision_result
-        else:
-            logger.warning("diagnostico_fitosanitario sin resultado de visión; se usarán defaults.")
-            ctx["vision"] = _vision_sin_datos()
+        ctx["vision"] = vision_result if vision_result else _vision_sin_datos()
 
     elif modo == "riego_fertilizacion":
         ctx["suelo"] = _normalizar_suelo(suelo)
@@ -101,7 +87,27 @@ def build_context(
     elif modo == "economia":
         ctx["costos"] = costos or {}
 
-    logger.debug("Contexto construido para modo '%s': %d campos.", modo, len(ctx))
+    # ── Fragmentos RAG ───────────────────────────────────────────────────────
+    # Máximo 2 fragmentos, cada uno truncado a 250 chars.
+    # RAZÓN DEL LÍMITE:
+    #   Cada fragmento agrega ~60-80 tokens al prompt.
+    #   Con n=2 el overhead es ~120-160 tokens, aceptable en Jetson.
+    #   Con n=3 o textos largos se supera el presupuesto de RAM del LLM.
+    if rag_fragmentos:
+        ctx["contexto_local_cr"] = [
+            {
+                "fuente": f["fuente"],
+                "info": f["texto"][:250],
+            }
+            for f in rag_fragmentos[:2]
+        ]
+
+    total_chars = len(json.dumps(ctx, ensure_ascii=False))
+    logger.debug(
+        "Contexto construido — modo=%s chars=%d rag_fragmentos=%d",
+        modo, total_chars, len(rag_fragmentos or []),
+    )
+
     return ctx
 
 
@@ -110,37 +116,38 @@ def context_to_json(ctx: dict, indent: bool = False) -> str:
     return json.dumps(ctx, ensure_ascii=False, indent=2 if indent else None)
 
 
-def validate_context(ctx: dict) -> list[str]:
+def validate_context(ctx: dict) -> list:
     """
     Valida el contexto y retorna lista de advertencias.
-    Retorna lista vacía si todo está bien.
+    Retorna lista vacía si todo está correcto.
     """
-    warnings = []
+    advertencias = []
 
-    if "modo" not in ctx:
-        warnings.append("Falta campo 'modo'.")
-    elif ctx["modo"] not in MODOS_VALIDOS:
-        warnings.append(f"Modo inválido: {ctx['modo']}.")
+    if ctx.get("modo") not in MODOS_VALIDOS:
+        advertencias.append(f"Modo inválido: {ctx.get('modo')}")
 
     if "cultivo" not in ctx:
-        warnings.append("Falta sección 'cultivo'.")
+        advertencias.append("Falta sección 'cultivo'.")
 
-    if ctx.get("modo") == "diagnostico_fitosanitario" and "vision" not in ctx:
-        warnings.append("Modo diagnóstico sin datos de visión.")
+    if (ctx.get("modo") == "diagnostico_fitosanitario"
+            and "vision" not in ctx):
+        advertencias.append("Modo diagnóstico sin datos de visión.")
 
-    # Verificar que el JSON no sea demasiado grande para Jetson (>2000 chars = riesgo)
-    json_len = len(json.dumps(ctx))
-    if json_len > 2000:
-        warnings.append(f"Contexto largo ({json_len} chars); puede presionar tokens en Jetson.")
+    total_chars = len(json.dumps(ctx, ensure_ascii=False))
+    if total_chars > 1500:
+        advertencias.append(
+            f"Contexto largo ({total_chars} chars). "
+            "Puede presionar tokens en Jetson. "
+            "Reducir campos RAG o datos de suelo."
+        )
 
-    return warnings
+    return advertencias
 
 
-# ------------------------------------------------------------------
-# Helpers privados
-# ------------------------------------------------------------------
+# ── Helpers privados ─────────────────────────────────────────────────────────
 
 def _normalizar_suelo(suelo: Optional[dict]) -> dict:
+    """Retorna suelo con valores por defecto para campos faltantes."""
     defaults = {
         "humedad_pct": None,
         "ph": None,
@@ -154,21 +161,22 @@ def _normalizar_suelo(suelo: Optional[dict]) -> dict:
 
 
 def _vision_sin_datos() -> dict:
+    """Retorna un resultado de visión vacío cuando no hay imagen."""
     return {
         "health_category": "desconocido",
         "disease_detected": "no evaluado",
         "severity_index": None,
         "confidence": None,
-        "observations": ["Sin imagen disponible; basarse en datos de suelo y etapa."],
+        "observations": ["Sin imagen disponible."],
     }
 
 
-def _validar_modo(modo: str) -> None:
+def _validar(modo: str, etapa: str) -> None:
     if modo not in MODOS_VALIDOS:
-        raise ValueError(f"Modo '{modo}' inválido. Modos válidos: {MODOS_VALIDOS}")
-
-
-def _validar_etapa(etapa: str) -> None:
-    etapas = {"emergencia", "vegetativo", "tuberizacion", "maduracion"}
-    if etapa not in etapas:
-        raise ValueError(f"Etapa '{etapa}' inválida. Etapas válidas: {etapas}")
+        raise ValueError(
+            f"Modo '{modo}' inválido. Válidos: {MODOS_VALIDOS}"
+        )
+    if etapa not in ETAPAS_VALIDAS:
+        raise ValueError(
+            f"Etapa '{etapa}' inválida. Válidas: {ETAPAS_VALIDAS}"
+        )

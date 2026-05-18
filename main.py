@@ -1,33 +1,19 @@
 """
-main.py
--------
-Orquestador principal de AGRI-EDGE-IA.
+main.py -- Orquestador principal AGRI-EDGE-IA
 
-Flujo obligatorio:
-  1. Leer configuración.
-  2. Verificar Ollama disponible.
-  3. Solicitar datos al usuario (CLI).
-  4. Construir contexto JSON  →  context_builder.py
-  5. Construir prompt final   →  prompt_builder.py
-  6. Enviar al LLM            →  llm_client.py
-  7. Mostrar resultado        →  cli.py
-  8. Guardar en SQLite        →  persistence.py
-
-REGLA: Nunca llamar directamente a OllamaClient con texto libre.
-       Todo prompt debe pasar por build_llm_request().
+Correcciones aplicadas:
+  1. Timeout subido a 120s para evitar fallos en contextos grandes.
+  2. PALABRAS_MANEJO agregado al detector de intent para cubrir
+     consultas sobre almacenamiento, semilla, postcosecha.
+  3. Consulta libre [L] no solicita datos de suelo ni vision mock.
+     Solo pregunta la etapa y usa el RAG como contexto principal.
 """
-#curl -fsSL https://ollama.ai/install.sh | sh
 
-import json
 import logging
 import sys
-from pathlib import Path
 
 import yaml
 
-# ------------------------------------------------------------------
-# Configuración de logging
-# ------------------------------------------------------------------
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     level=logging.INFO,
@@ -35,36 +21,97 @@ logging.basicConfig(
 )
 logger = logging.getLogger("agri-edge-ia")
 
+# ── Deteccion de intent por palabras clave ───────────────────────────────────
 
-def cargar_config(ruta: str = "config/settings.yaml") -> dict:
-    with open(ruta, encoding="utf-8") as f:
+PALABRAS_DIAGNOSTICO = {
+    "mancha", "manchas", "hoja", "hojas", "enfermedad", "hongo", "tizon",
+    "amarilla", "amarillo", "negra", "negro", "lesion", "plaga", "sintoma",
+    "planta", "follaje", "pudricion", "virus", "bacteria", "fusarium",
+    "rhizoctonia", "infestans",
+}
+
+PALABRAS_RIEGO = {
+    "agua", "riego", "regar", "humedad", "seco", "seca", "fertiliz",
+    "abono", "nutriente", "nitrogeno", "potasio", "fosforo", "ph",
+    "suelo", "lluvia", "irrigar", "fertilizacion",
+}
+
+PALABRAS_ECONOMIA = {
+    "precio", "vender", "venta", "mercado", "pima", "costo", "ganancia",
+    "dinero", "plata", "colones", "rentab", "margen", "kilo",
+    "kilogramo", "negocio", "utilidad", "perdida",
+}
+
+PALABRAS_MANEJO = {
+    "almacena", "almacenamiento", "almacenar", "semilla", "guardar",
+    "bodega", "postcosecha", "conservar", "conservacion", "silo",
+    "saco", "jaba", "brote", "brotacion",
+}
+
+
+def detectar_modo(texto: str) -> str:
+    """
+    Detecta el modo segun palabras clave.
+    El orden importa: diagnostico tiene prioridad.
+    """
+    palabras = set(
+        texto.lower()
+        .replace(",", " ").replace(".", " ").replace("?", " ")
+        .split()
+    )
+    if palabras & PALABRAS_DIAGNOSTICO:
+        return "diagnostico_fitosanitario"
+    if palabras & PALABRAS_ECONOMIA:
+        return "economia"
+    if palabras & PALABRAS_RIEGO:
+        return "riego_fertilizacion"
+    if palabras & PALABRAS_MANEJO:
+        return "riego_fertilizacion"
+    return "diagnostico_fitosanitario"
+
+
+def cargar_config() -> dict:
+    with open("config/settings.yaml", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
-def main():
-    # ------------------------------------------------------------------
-    # 1. Configuración
-    # ------------------------------------------------------------------
-    cfg = cargar_config()
+def aplicar_overrides_jetson(cfg: dict) -> dict:
+    if cfg.get("entorno") == "jetson":
+        overrides = cfg.get("jetson_overrides", {})
+        cfg["ollama"].update(overrides)
+        logger.info("Modo Jetson activado. Overrides: %s", overrides)
+    return cfg
 
-    # Ajustar nivel de log
+
+def mostrar_menu():
+    print()
+    print("-" * 52)
+    print("  AGRI-EDGE-IA -- Asistente Agricola Offline")
+    print("-" * 52)
+    print("  [1] Diagnostico fitosanitario")
+    print("  [2] Riego y fertilizacion")
+    print("  [3] Analisis economico")
+    print("  [L] Consulta libre (escribir pregunta)")
+    print("  [q] Salir")
+
+
+def main():
+    cfg = cargar_config()
+    cfg = aplicar_overrides_jetson(cfg)
+
     nivel = cfg.get("logs", {}).get("level", "INFO")
     logging.getLogger().setLevel(getattr(logging, nivel, logging.INFO))
 
-    # ------------------------------------------------------------------
-    # 2. Imports de módulos (después de configuración)
-    # ------------------------------------------------------------------
     from modules.llm_client import OllamaClient
     from modules.context_builder import build_context, validate_context, context_to_json
     from modules.prompt_builder import build_llm_request
     from modules.vision_mock import analyze as vision_analyze
-    from modules.agri_logic import calcular_riego, recomendar_fertilizacion, analizar_economia
+    from modules.agri_logic import calcular_riego, analizar_economia
     from modules.persistence import AgriDatabase
+    from modules.rag_retriever import RAGRetriever
     from modules import cli
 
-    # ------------------------------------------------------------------
-    # 3. Inicializar servicios
-    # ------------------------------------------------------------------
+    # ── Inicializar servicios ────────────────────────────────────────────────
     ollama_cfg = cfg["ollama"]
     cliente = OllamaClient(
         host=ollama_cfg["host"],
@@ -72,110 +119,197 @@ def main():
         timeout=ollama_cfg["timeout"],
         num_predict=ollama_cfg["num_predict"],
         temperature=ollama_cfg["temperature"],
+        stream=ollama_cfg.get("stream", True),
     )
     db = AgriDatabase(cfg["base_datos"]["path"])
 
-    # Verificar salud de Ollama
-    cli.imprimir("\n🔍 Verificando conexión con Ollama…", "cyan")
+    # RAG
+    rag = None
+    rag_cfg = cfg.get("rag", {})
+    if rag_cfg.get("habilitado", False):
+        rag = RAGRetriever(
+            index_path=rag_cfg.get("index_path", "rag/index"),
+            model_name=rag_cfg.get("model_name", "all-MiniLM-L6-v2"),
+        )
+        if rag.disponible:
+            print("RAG activo -- contexto local disponible")
+        else:
+            print("AVISO: RAG no disponible. Ejecutar: python scripts/build_rag_index.py")
+            rag = None
+
+    # Verificar Ollama
+    print(f"\nVerificando Ollama ({ollama_cfg['model']})...")
     if not cliente.health_check():
-        cli.imprimir(
-            f"❌ Ollama no disponible o modelo '{ollama_cfg['model']}' no cargado.\n"
-            f"   Ejecuta: ollama pull {ollama_cfg['model']}\n"
-            f"   Luego:   ollama serve",
-            "red",
+        print(
+            f"ERROR: Modelo '{ollama_cfg['model']}' no disponible.\n"
+            f"  Ejecuta: ollama pull {ollama_cfg['model']}\n"
+            f"  Luego:   ollama serve"
         )
         sys.exit(1)
-    cli.imprimir(f"✅ Ollama OK — modelo: {ollama_cfg['model']}", "green")
+    print(f"Ollama OK -- {ollama_cfg['model']}")
 
-    # ------------------------------------------------------------------
-    # 4. Ciclo principal de consultas
-    # ------------------------------------------------------------------
+    # ── Ciclo principal ──────────────────────────────────────────────────────
     while True:
-        modo = cli.seleccionar_modo()
-        if modo == "salir":
-            cli.imprimir("\nHasta luego. 🌱", "green")
+        mostrar_menu()
+        opcion = input("\nOpcion: ").strip().lower()
+
+        if opcion == "q":
+            print("\nHasta luego.")
             break
 
-        etapa = cli.solicitar_etapa()
-        suelo = cli.solicitar_datos_suelo() if modo in (
-            "diagnostico_fitosanitario", "riego_fertilizacion"
-        ) else {}
-        costos = cli.solicitar_datos_economia() if modo == "economia" else {}
+        # ── Determinar modo ──────────────────────────────────────────────────
+        pregunta_libre = None
 
-        # --- F2: Visión (mock en Fase 0-1) ---
+        if opcion == "1":
+            modo = "diagnostico_fitosanitario"
+        elif opcion == "2":
+            modo = "riego_fertilizacion"
+        elif opcion == "3":
+            modo = "economia"
+        elif opcion == "l":
+            pregunta_libre = input("\nEscriba su consulta: ").strip()
+            if not pregunta_libre:
+                print("Consulta vacia, volviendo al menu.")
+                continue
+            modo = detectar_modo(pregunta_libre)
+            print(f"  Modo detectado: {modo.replace('_', ' ')}")
+        else:
+            print("  Opcion invalida. Use 1, 2, 3, L o q.")
+            continue
+
+        # ── Etapa fenologica ─────────────────────────────────────────────────
+        # En consulta libre no se pregunta la etapa, se usa vegetativo por defecto.
+        # Solo tiene sentido pedirla en modos guiados donde el contexto la necesita.
+        if pregunta_libre is None:
+            etapas = ["emergencia", "vegetativo", "tuberizacion", "maduracion"]
+            print(f"\nEtapas disponibles: {' | '.join(etapas)}")
+            etapa_input = input("Etapa fenologica (Enter = vegetativo): ").strip().lower()
+            etapa = etapa_input if etapa_input in etapas else "vegetativo"
+        else:
+            etapa = "vegetativo"
+
+        # ── Datos segun modo ─────────────────────────────────────────────────
+        # Consulta libre [L]: no pide suelo ni vision.
+        #   El RAG provee el contexto. El agricultor ya escribio su pregunta.
+        # Modo guiado (1, 2, 3): solicita todos los datos necesarios.
+
+        suelo = {}
+        costos = {}
         vision_result = None
-        if modo == "diagnostico_fitosanitario":
-            escenario = input(
-                "\nEscenario de visión mock [default/sano/tizon_leve/tizon_grave/fusariosis/random]: "
-            ).strip() or "default"
-            vision_result = vision_analyze(escenario=escenario)
-            cli.imprimir(f"\n📷 Resultado visión mock: {vision_result['disease_detected']} "
-                         f"(severidad {vision_result['severity_index']})", "yellow")
+        econ = {}
+        riego = {}
 
-        # --- F4: Lógica agrícola ---
-        if modo == "riego_fertilizacion" and suelo:
-            riego = calcular_riego(suelo["humedad_pct"], etapa)
-            fertil = recomendar_fertilizacion(
-                etapa, suelo["nitrogeno"], suelo["fosforo"], suelo["potasio"]
-            )
-            cli.imprimir(f"\n💧 Riego calculado: {riego['frecuencia']} — "
-                         f"{riego['volumen_litros_por_planta']} L/planta", "cyan")
+        if pregunta_libre is None:
+            if modo in ("diagnostico_fitosanitario", "riego_fertilizacion"):
+                suelo = cli.solicitar_datos_suelo()
 
-        if modo == "economia" and costos:
-            econ = analizar_economia(
-                costos["costo_total_crc"], costos["rendimiento_esperado_kg"], costos["calidad"]
-            )
-            costos.update(econ)
+            if modo == "diagnostico_fitosanitario":
+                print("\nEscenarios: default | sano | tizon_leve | tizon_grave | fusariosis | random")
+                esc = input("Escenario de vision mock (Enter = default): ").strip() or "default"
+                vision_result = vision_analyze(escenario=esc)
+                print(
+                    f"Vision: {vision_result['disease_detected']} "
+                    f"(severidad {vision_result['severity_index']})"
+                )
 
-        # --- F3: Construcción de contexto y prompt ---
+            if modo == "riego_fertilizacion" and suelo:
+                try:
+                    riego = calcular_riego(float(suelo.get("humedad_pct", 60)), etapa)
+                    print(f"Riego calculado: {riego.get('frecuencia', 'N/A')}")
+                except Exception as e:
+                    logger.warning("Error calculando riego: %s", e)
+
+            if modo == "economia":
+                costos = cli.solicitar_datos_economia()
+                try:
+                    econ = analizar_economia(
+                        costos["costo_total_crc"],
+                        costos["rendimiento_esperado_kg"],
+                        costos["calidad"],
+                    )
+                    costos.update(econ)
+                except Exception as e:
+                    logger.warning("Error en analisis economico: %s", e)
+
+        # ── RAG ──────────────────────────────────────────────────────────────
+        rag_fragmentos = []
+        if rag:
+            if pregunta_libre:
+                # Consulta libre: usar la pregunta exacta del agricultor como query
+                # Esto recupera fragmentos sobre almacenamiento, semilla, etc.
+                rag_fragmentos = rag.retrieve(pregunta_libre, n=2)
+            else:
+                # Modo guiado: usar query predefinida por modo
+                query_rag = ""
+                if vision_result:
+                    query_rag += f" {vision_result.get('disease_detected', '')}"
+                rag_fragmentos = rag.retrieve_para_modo(modo, query_rag)
+            if rag_fragmentos:
+                fuentes = ", ".join(f["fuente"] for f in rag_fragmentos)
+                print(f"RAG: {len(rag_fragmentos)} fragmento(s) -- {fuentes}")
+
+        # ── Contexto JSON ────────────────────────────────────────────────────
+        modo_prompt = "consulta_libre" if pregunta_libre else modo
         try:
+            suelo_valido = suelo if suelo and any(v is not None for v in suelo.values()) else None
             ctx = build_context(
                 modo=modo,
                 etapa_fenologica=etapa,
-                suelo=suelo or None,
+                suelo=suelo_valido,
                 vision_result=vision_result,
                 costos=costos or None,
+                rag_fragmentos=rag_fragmentos,
             )
+            if pregunta_libre:
+                ctx["pregunta"] = pregunta_libre
         except ValueError as e:
-            cli.imprimir(f"❌ Error en contexto: {e}", "red")
+            print(f"ERROR en contexto: {e}")
             continue
 
-        advertencias = validate_context(ctx)
-        for w in advertencias:
-            cli.imprimir(f"⚠️  {w}", "yellow")
+        for advertencia in validate_context(ctx):
+            print(f"AVISO: {advertencia}")
 
-        # Mostrar contexto JSON antes de enviarlo (debug)
         print("\n--- CONTEXTO JSON ENVIADO AL LLM ---")
         print(context_to_json(ctx, indent=True))
-        print("------------------------------------\n")
+        print("-------------------------------------\n")
 
-        prompt = build_llm_request(mode=modo, context=ctx)
-
-        # --- Envío al LLM ---
-        cli.imprimir("⏳ Consultando al LLM…", "cyan")
+        # ── LLM ──────────────────────────────────────────────────────────────
+        prompt = build_llm_request(mode=modo_prompt, context=ctx)
+        print("Consultando al LLM...")
         resultado = cliente.generate(prompt)
 
-        # Log en BD
         db.log_llm(modo, resultado)
 
         if not resultado["success"]:
-            cli.imprimir(f"❌ Error LLM: {resultado['error']}", "red")
+            print(f"ERROR LLM: {resultado['error']}")
             continue
 
-        # --- Guardar en SQLite ---
-        if modo == "diagnostico_fitosanitario" and vision_result:
-            db.guardar_diagnostico(etapa, vision_result, suelo, resultado)
-        elif modo == "riego_fertilizacion":
-            db.guardar_riego(etapa, suelo, riego, resultado["response"])
-        elif modo == "economia":
-            db.guardar_economia(econ, resultado["response"])
+        # ── Guardar en BD ────────────────────────────────────────────────────
+        try:
+            if modo == "diagnostico_fitosanitario" and vision_result:
+                db.guardar_diagnostico(etapa, vision_result, suelo, resultado)
+            elif modo == "riego_fertilizacion" and riego:
+                db.guardar_riego(etapa, suelo, riego, resultado["response"])
+            elif modo == "economia" and econ:
+                db.guardar_economia(econ, resultado["response"])
+        except Exception as e:
+            logger.warning("Error guardando en BD: %s", e)
 
-        # --- F6: Mostrar resultado ---
+        # ── Resultado ────────────────────────────────────────────────────────
         cli.mostrar_resultado(resultado, modo)
 
-        continuar = input("\n¿Realizar otra consulta? [s/N]: ").strip().lower()
-        if continuar != "s":
-            cli.imprimir("\nHasta luego. 🌱", "green")
+        resumen = resultado.get("resumen", "")
+        if resumen:
+            print(f"\nResumen para audio TTS:\n  {resumen}")
+
+        print(
+            f"\n[Latencia: {resultado['latency_s']:.1f}s | "
+            f"Tokens entrada: {resultado['prompt_tokens']} | "
+            f"Tokens salida: {resultado['response_tokens']}]"
+        )
+
+        if input("\nOtra consulta? [s/N]: ").strip().lower() != "s":
+            print("\nHasta luego.")
             break
 
     db.close()
