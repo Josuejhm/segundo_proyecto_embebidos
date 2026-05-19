@@ -1,92 +1,111 @@
 # AGRI-EDGE-IA
 
-**Sistema Inteligente de Borde para Monitoreo de Cultivos de Papa**
+Sistema inteligente de borde para monitoreo y diagnóstico de cultivos de papa.
 EdgeLLM sobre NVIDIA Jetson Nano B01 — TEC · CEDA · IS-2026
 
----
+**Integrantes:**
+- Leonardo Pérez Sandoval — Director del Proyecto
+- David Leitón Flores — Líder Técnico / Arquitecto
+- Josué Hernández Medina — Investigador / Auditor
 
-## Resumen Ejecutivo
-
-AGRI-EDGE-IA es un asistente agrícola offline que corre sobre hardware embebido de bajo costo. Antes de construir la imagen Yocto o tocar el Jetson Nano, se desarrolla y valida primero en PC local porque:
-
-1. Iterar sobre PC es decenas de veces más rápido que sobre Jetson.
-2. Validar el LLM localmente elimina el riesgo de descubrir problemas de prompts en hardware restrictivo.
-3. Python como orquestador permite pruebas unitarias rápidas de cada módulo de forma independiente.
-4. El diseño modular (F1–F6) garantiza que reemplazar el mock de visión por OpenCV real no rompe nada.
-5. Una vez que el asistente CLI funciona en PC, migrar a Jetson es básicamente un cambio de entorno, no de arquitectura.
-
-La migración a Yocto ocurre al final, cuando el sistema ya es estable y probado.
+**Facilitador:** Dr. Ing. Johan Carvajal Godínez — johcarvajal@itcr.ac.cr
 
 ---
 
-## Arquitectura General
+## Estado actual del proyecto
 
-```
-Entrada (Cámara / Micrófono / Teclado)
-         ↓
-  F1 — Captura y Preprocesamiento
-         ↓
-  F2 — Visión Computacional (mock → OpenCV + CUDA)
-         ↓
-  F4 — Lógica Agrícola (reglas de negocio locales)
-         ↓
-  context_builder.py → contexto JSON compacto
-         ↓
-  prompt_builder.py  → prompt especializado
-         ↓
-  F3 — LLM (Ollama + PHI-3-mini Q4_K_M)
-         ↓
-  F5 — Persistencia (SQLite)
-         ↓
-  F6 — Salida (CLI → Qt6 → Audio TTS)
+| Fase | Descripción | Estado |
+|---|---|---|
+| Fase 0 | Validación LLM local | Completada |
+| Fase 1 | Asistente CLI con mock de visión | Completada |
+| Fase 2 | Modularización F1–F6 + tests | Completada |
+| Fase 3A | RAG con documentos locales | Completada |
+| Fase 3B | Visión OpenCV real | Pendiente |
+| Fase 3C | Audio ASR/TTS | Pendiente |
+| Fase 4 | Migración a Jetson Nano | Pendiente |
+| Fase 5 | Imagen Yocto | Pendiente |
+
+---
+
+## Modelo LLM
+
+**Modelo en uso:** `qwen2.5:3b`
+Reemplazó a `phi3:mini` por menor tasa de alucinaciones y mejor salida JSON estructurada.
+
+```bash
+ollama pull qwen2.5:3b
 ```
 
 ---
 
-## Flujo Local de Desarrollo
+## Instalación local
 
-```
-Fase 0 → Validar Ollama + modelo en PC
-Fase 1 → Asistente CLI funcional (mock visión)
-Fase 2 → Modularización F1–F6 + tests unitarios
-Fase 3 → SQLite + logs + OpenCV real + audio
-Fase 4 → Migración a Jetson Nano
-Fase 5 → Empaquetado en imagen Yocto
+**Requisitos:** Python 3.9+, Ollama, Linux o WSL.
+
+```bash
+# 1. Clonar repositorio
+git clone https://github.com/tu-usuario/agri-edge-ia.git
+cd agri-edge-ia
+
+# 2. Entorno virtual
+python3 -m venv venv
+source venv/bin/activate
+
+# 3. Dependencias
+pip install -r requirements.txt
+pip install chromadb sentence-transformers
+
+# 4. Instalar y levantar Ollama
+curl -fsSL https://ollama.ai/install.sh | sh
+ollama serve &
+ollama pull qwen2.5:3b
+
+# 5. Inicializar base de datos
+python scripts/init_db.py
+
+# 6. Construir índice RAG (una sola vez en PC)
+python scripts/build_rag_index.py
+
+# 7. Verificar
+python scripts/test_ollama.py --model qwen2.5:3b
 ```
 
 ---
 
-## Cómo se le Brinda Contexto al LLM
+## Ejecución
 
-Esta es la sección más importante del proyecto. El LLM **nunca** recibe preguntas sueltas.
+```bash
+python main.py
+```
 
-### El problema
+Opciones del menú:
 
-PHI-3-mini (u otro modelo pequeño) no conoce:
-- El estado actual del cultivo.
-- Los datos del suelo del agricultor.
-- El resultado del análisis de visión.
-- El historial de riegos o diagnósticos.
-- Las condiciones locales de Costa Rica.
+- `[1]` Diagnóstico fitosanitario — pide etapa, suelo y escenario de visión
+- `[2]` Riego y fertilización — pide etapa y datos de suelo
+- `[3]` Análisis económico — pide costos y rendimiento esperado
+- `[L]` Consulta libre — el agricultor escribe en lenguaje natural sin formularios
 
-Si se le pregunta directamente "¿qué enfermedad tiene mi planta?", el modelo no puede responder con precisión porque no tiene esos datos.
+---
 
-### La solución: Contexto JSON estructurado
+## Cómo se le brinda contexto al LLM
 
-La aplicación construye un bloque JSON antes de cada llamada al LLM, con **solo los datos relevantes al modo activo** (para no desperdiciar tokens ni RAM).
-
-### Flujo obligatorio
+El LLM nunca recibe preguntas sueltas. Antes de cada llamada se construye un contexto JSON con tres fuentes:
 
 ```
-Datos del usuario + datos de cultivo + datos de suelo + resultado de visión
-         ↓
-  context_builder.py  →  dict de contexto validado
-         ↓
-  prompt_builder.py   →  prompt final con contexto inyectado
-         ↓
-  llm_client.py       →  POST /api/generate a Ollama
-         ↓
-  respuesta JSON + resumen corto
+Datos del usuario (suelo, etapa, costos)
+        +
+Resultado de visión (mock o OpenCV)
+        +
+RAG: fragmentos de documentos locales
+        |
+        v
+context_builder.py --> contexto JSON compacto
+        |
+        v
+prompt_builder.py  --> prompt especializado por modo
+        |
+        v
+Ollama + qwen2.5:3b --> respuesta JSON + resumen
 ```
 
 ### Ejemplo de contexto JSON
@@ -97,7 +116,7 @@ Datos del usuario + datos de cultivo + datos de suelo + resultado de visión
   "cultivo": {
     "tipo": "papa",
     "variedad": "La Floresta",
-    "ubicacion": "Cartago, Costa Rica",
+    "ubicacion": "Tierra Blanca de Cartago, Costa Rica",
     "etapa_fenologica": "vegetativo"
   },
   "suelo": {
@@ -111,304 +130,175 @@ Datos del usuario + datos de cultivo + datos de suelo + resultado de visión
     "health_category": "regular",
     "disease_detected": "posible tizón tardío",
     "severity_index": 0.42,
-    "confidence": 0.78,
-    "observations": [
-      "manchas oscuras en hojas",
-      "lesiones compatibles con daño foliar",
-      "requiere validación en campo"
-    ]
+    "confidence": 0.78
   },
-  "restricciones_respuesta": {
-    "idioma": "español costarricense claro",
-    "formato": "json_mas_resumen",
-    "max_tokens": 250,
-    "incluir_nota_seguridad": true
-  }
+  "contexto_local_cr": [
+    {
+      "fuente": "enfermedades_papa_CR.txt",
+      "info": "El tizón tardío causado por P. infestans puede devastar..."
+    }
+  ]
 }
-```
-
-### Ejemplo de prompt final ensamblado
-
-```
-Eres un asistente agrícola offline para productores de papa en Costa Rica.
-Trabajas sin conexión a internet. Usa ÚNICAMENTE el contexto JSON que se te proporciona.
-No inventes datos que no estén en el contexto.
-Responde en español costarricense claro y accesible.
-
-[instrucciones de formato JSON...]
-
-⚠️ Esta recomendación es orientativa. Consulte a un agrónomo certificado antes de aplicar agroquímicos.
-
-CONTEXTO:
-{...json aquí...}
 ```
 
 ### Regla de implementación
 
 ```
-NUNCA llamar directamente a OllamaClient con texto libre desde main.py.
-Toda llamada debe pasar por:
-  1. context_builder.py  → genera el dict de contexto
-  2. prompt_builder.py   → construye el prompt con build_llm_request()
-  3. llm_client.py       → envía el prompt y retorna el resultado
+Nunca llamar al LLM con texto libre desde main.py.
+Toda llamada pasa por:
+  1. context_builder.py  --> contexto JSON validado
+  2. prompt_builder.py   --> prompt especializado por modo
+  3. llm_client.py       --> POST a Ollama, retorna JSON + resumen
 ```
-
-### Checklist antes de enviar al LLM
-
-- [ ] El contexto JSON es válido (parseable).
-- [ ] El contexto no incluye datos innecesarios para el modo activo.
-- [ ] El modo seleccionado coincide con la plantilla de prompt usada.
-- [ ] `num_predict` está limitado (≤300 en PC, ≤200 en Jetson).
-- [ ] La respuesta esperada está especificada como JSON.
-- [ ] Se incluye nota de seguridad agronómica.
-- [ ] La consulta se registra en SQLite (`tb_llm_log`).
-- [ ] El contexto JSON tiene menos de 2000 caracteres.
 
 ---
 
-## Instalación Local
+## RAG — Recuperación de contexto local
 
-### Requisitos
+El RAG permite que el LLM responda con información específica de Costa Rica sin internet.
+El índice se construye una vez en PC y se copia como archivo estático en la imagen Yocto.
 
-- Linux o WSL (Ubuntu 22.04+).
-- Python 3.9+.
-- Ollama instalado.
+**Documentos disponibles en `rag/documentos/`:**
 
-### Pasos
+| Archivo | Contenido |
+|---|---|
+| `enfermedades_papa_CR.txt` | Tizón tardío, fusariosis, virosis, Rhizoctonia |
+| `riego_fertilizacion_papa_CR.txt` | Demanda hídrica FAO-24, pH, N/P/K por etapa |
+| `economia_papa_CR.txt` | Precios PIMA, costos por hectárea, rentabilidad |
+| `INFORME_COSTO_KG_PAPA_V2_MEJORADO.md` | Estudios reales Ecuador 2019 y Perú 2021 |
+| `Manual_Cultivo_Papa_Costa_Rica_INTA.md` | Manual INTA Costa Rica |
+| `Crecimiento_acumulacion_nutrimentos_papa_Elbe-UCR.md` | Nutrición mineral UCR |
+| `Almacenamiento_Papa_Ecuador_CIP.md` | Métodos de almacenamiento CIP |
+
+**Comandos:**
 
 ```bash
-# 1. Clonar repositorio
-git clone https://github.com/tu-usuario/agri-edge-ia.git
-cd agri-edge-ia
+# Construir o reconstruir el índice (al agregar documentos nuevos)
+python scripts/build_rag_index.py
 
-# 2. Crear entorno virtual
-python3 -m venv venv
-source venv/bin/activate
-
-# 3. Instalar dependencias
-pip install -r requirements.txt
-
-# 4. Instalar Ollama (si no está instalado)
-curl -fsSL https://ollama.ai/install.sh | sh
-
-# 5. Iniciar Ollama en background
-ollama serve &
-
-# 6. Descargar modelo objetivo
-ollama pull phi3:mini
-
-# Alternativa más liviana para pruebas iniciales:
-# ollama pull tinyllama
-
-# 7. Verificar modelo disponible
-ollama list
-
-# 8. Prueba manual desde terminal
-ollama run phi3:mini "¿Cuál es la principal enfermedad del cultivo de papa?"
-
-# 9. Inicializar base de datos
-python scripts/init_db.py
-
-# 10. Ejecutar validación Fase 0
-python scripts/test_ollama.py --model phi3:mini
+# Verificar que el índice recupera bien
+python scripts/build_rag_index.py --test
 ```
 
 ---
 
-## Ejecución de Pruebas
-
-```bash
-# Validación de Ollama (Fase 0)
-python scripts/test_ollama.py
-
-# Benchmark de rendimiento
-python scripts/benchmark_llm.py --runs 3
-
-# Tests unitarios
-pytest tests/ -v
-
-# Test específico
-pytest tests/test_agri_logic.py -v
-```
-
----
-
-## Ejecución del Asistente CLI
-
-```bash
-# Asegurarse que Ollama está corriendo
-ollama serve &
-
-# Iniciar asistente
-python main.py
-```
-
-El asistente mostrará el menú, solicitará datos por teclado, construirá el contexto JSON, lo imprimirá antes de enviarlo, y mostrará la respuesta del LLM con métricas.
-
----
-
-## Estructura del Proyecto
+## Estructura del proyecto
 
 ```
 agri-edge-ia/
-├── README.md                        # Este archivo
-├── requirements.txt                 # Dependencias Python mínimas
 ├── main.py                          # Orquestador principal
+├── requirements.txt
 ├── config/
-│   └── settings.yaml               # Configuración (host Ollama, modelo, BD)
-├── prompts/
-│   ├── diagnostico_fitosanitario.md # Plantilla de prompt para diagnóstico
-│   ├── riego_fertilizacion.md       # Plantilla de prompt para riego
-│   └── economia.md                  # Plantilla de prompt para economía
+│   └── settings.yaml               # Modelo, timeouts, RAG, entorno
 ├── modules/
-│   ├── llm_client.py               # F3: cliente HTTP para Ollama
-│   ├── context_builder.py          # F3: construye el contexto JSON
-│   ├── prompt_builder.py           # F3: ensambla prompt final
-│   ├── vision_mock.py              # F2: simulación de visión (Fase 0-2)
-│   ├── agri_logic.py               # F4: reglas de negocio agrícolas
-│   ├── persistence.py              # F5: SQLite
-│   └── cli.py                      # F6: interfaz de línea de comandos
+│   ├── llm_client.py               # Cliente Ollama con streaming
+│   ├── context_builder.py          # Construye contexto JSON + RAG
+│   ├── prompt_builder.py           # Ensambla prompt final por modo
+│   ├── rag_retriever.py            # Recupera fragmentos del índice local
+│   ├── vision_mock.py              # Simula visión (Fase 0-2)
+│   ├── agri_logic.py               # Reglas de negocio agrícolas
+│   ├── persistence.py              # SQLite
+│   └── cli.py                      # Interfaz de línea de comandos
+├── prompts/
+│   ├── diagnostico_fitosanitario.md
+│   ├── riego_fertilizacion.md
+│   ├── economia.md
+│   └── consulta_libre.md
+├── rag/
+│   ├── documentos/                 # Fuentes de conocimiento (.txt y .md)
+│   └── index/                      # Índice vectorial ChromaDB (no editar)
 ├── scripts/
 │   ├── test_ollama.py              # Validación Fase 0
 │   ├── benchmark_llm.py            # Métricas de rendimiento
-│   └── init_db.py                  # Inicialización de BD con datos muestra
+│   ├── build_rag_index.py          # Construye índice RAG en PC
+│   └── init_db.py                  # Inicializa SQLite con datos de muestra
 ├── data/
-│   ├── images/                     # Imágenes de prueba (Fase 3+)
-│   ├── db/                         # Base de datos SQLite
-│   └── samples/                    # Datos de muestra para tests
+│   └── db/                         # Base de datos SQLite
 ├── tests/
 │   ├── test_context_builder.py
-│   ├── test_prompt_builder.py
 │   └── test_agri_logic.py
 └── yocto/
     ├── notes.md                    # Notas técnicas para imagen Yocto
-    ├── agri-edge.service           # Servicio systemd
-    └── recipe-draft/               # Borradores de recetas Bitbake
+    └── agri-edge.service           # Servicio systemd
+```
+
+---
+
+## Configuración principal
+
+`config/settings.yaml`:
+
+```yaml
+entorno: "local"       # cambiar a "jetson" en el dispositivo
+
+ollama:
+  model: "qwen2.5:3b"
+  timeout: 120
+  num_predict: 300
+  temperature: 0.1
+  stream: true
+
+rag:
+  habilitado: true
+  index_path: "rag/index"
+  n_resultados: 2
+```
+
+Al cambiar `entorno: "jetson"`, se aplican automáticamente `timeout: 120` y `num_predict: 200`.
+
+---
+
+## Pruebas
+
+```bash
+# Tests unitarios
+pytest tests/ -v
+
+# Validar Ollama
+python scripts/test_ollama.py --model qwen2.5:3b
+
+# Benchmark (latencia y tasa JSON válido)
+python scripts/benchmark_llm.py --model qwen2.5:3b --show-response
 ```
 
 ---
 
 ## Migración a Jetson Nano
 
-### Checklist de migración (Fase 4)
+Antes de migrar, verificar en PC:
 
-- [ ] Ollama ARM64 build disponible y descargado.
-- [ ] `ollama pull phi3:mini` ejecutado en Jetson (o modelo copiado desde PC).
-- [ ] RAM libre verificada: `free -m` → disponible > 400 MB durante operación.
-- [ ] `python scripts/test_ollama.py` pasa en Jetson.
-- [ ] Latencia medida: `python scripts/benchmark_llm.py` → debe ser < 30s/consulta.
-- [ ] `num_predict` reducido a 200 en `config/settings.yaml`.
-- [ ] Cámara CSI detectada: `ls /dev/video*`.
-- [ ] OpenCV con CUDA 10.2 compilado y probado.
-- [ ] SQLite funciona en microSD ext4.
-- [ ] Sistema opera completamente sin internet.
-- [ ] Temperatura monitorizada durante carga: `cat /sys/devices/virtual/thermal/thermal_zone*/temp`.
+- `pytest tests/ -v` — 100 % pass
+- `benchmark_llm.py` — JSON > 80 % y latencia < 60s en PC
+- Los cuatro modos del menú responden correctamente
 
-### Ajustes para Jetson
+En Jetson, cambiar en `settings.yaml`:
 
 ```yaml
-# config/settings.yaml — ajustes para Jetson Nano
-ollama:
-  timeout: 180        # más tiempo para GPU Maxwell
-  num_predict: 200    # reducir tokens para presión de RAM
+entorno: "jetson"
+```
+
+Checklist en Jetson:
+
+```
+[ ] ollama pull qwen2.5:3b ejecutado en Jetson
+[ ] python scripts/test_ollama.py pasa
+[ ] free -m muestra RAM libre > 400 MB durante operacion
+[ ] Temperatura bajo carga < 80 C
+[ ] Camara CSI detectada: ls /dev/video*
+[ ] Sistema opera sin internet (desconectar Ethernet y probar)
+[ ] rag/index/ copiado desde PC
 ```
 
 ---
 
 ## Preparación para Yocto
 
-Ver `yocto/notes.md` para instrucciones detalladas.
+Ver `yocto/notes.md` para instrucciones completas.
 
-**Regla**: No construir imagen Yocto hasta que:
-1. `pytest tests/ -v` → 100% pass.
-2. `python scripts/benchmark_llm.py` → latencia < 30s en Jetson, JSON > 80%.
-3. Los 3 casos de uso demuestran funcionamiento correcto en Jetson con datos reales.
+Archivos que van en la imagen como estáticos (no se generan en Jetson):
+- `rag/index/` — índice vectorial pre-construido en PC
+- Modelo GGUF qwen2.5:3b — incluir en receta Bitbake como `SRC_URI = "file://..."`
 
----
-
-## Criterios de Aceptación por Fase
-
-### Fase 0 — Validación Local LLM
-
-| Criterio | Valor mínimo |
-|---|---|
-| `test_ollama.py` 4/4 tests pasan | 100% |
-| Latencia de inferencia en PC | < 60s |
-| Respuesta coherente en español | Sí |
-
-### Fase 1 — Asistente CLI
-
-| Criterio | Valor mínimo |
-|---|---|
-| `main.py` genera recomendación agrícola | Sí |
-| Contexto JSON impreso es válido | Siempre |
-| LLM responde JSON parseable | ≥ 8/10 consultas |
-| Prompt no supera 3000 caracteres | Siempre |
-| Sin dependencias incompatibles con ARM64 | Sí |
-
-### Fase 4 — Jetson Nano
-
-| Criterio | Valor mínimo |
-|---|---|
-| RAM en operación normal | < 3.6 GB |
-| Latencia respuesta LLM | < 30s |
-| Temperatura bajo carga | < 80°C |
-| Operación sin internet | Completa |
-
----
-
-## Métricas Recomendadas
-
-Las siguientes métricas se registran automáticamente en `tb_llm_log`:
-
-| Métrica | Cómo medirla |
-|---|---|
-| Latencia total | `llm_result["latency_s"]` |
-| Tokens de entrada | `llm_result["prompt_tokens"]` |
-| Tokens de salida | `llm_result["response_tokens"]` |
-| Tasa de éxito JSON | `json_ok / total_consultas` |
-| Uso RAM | `/proc/meminfo → MemAvailable` |
-| Errores LLM | `tb_llm_log WHERE success=0` |
-
-Para ver métricas históricas:
-
-```bash
-sqlite3 data/db/agri_edge.db \
-  "SELECT modo, AVG(latency_s), AVG(tokens_salida), 
-   SUM(CASE WHEN success=1 THEN 1 ELSE 0 END)*100/COUNT(*) as pct_ok
-   FROM tb_llm_log GROUP BY modo;"
-```
-
----
-
-## Limitaciones Actuales (Fase 0-1)
-
-- Visión computacional es un mock; no analiza imágenes reales.
-- No hay integración de audio (ASR/TTS).
-- No hay interfaz gráfica Qt6.
-- La base de datos de precios PIMA es estática (datos de muestra).
-- Los modelos de enfermedades no están validados con datos de campo costarricense.
-
----
-
-## Próximos Pasos Inmediatos
-
-1. Ejecutar `python scripts/test_ollama.py` → confirmar Fase 0.
-2. Ejecutar `python scripts/benchmark_llm.py` → medir latencia base.
-3. Ejecutar `python main.py` → primera consulta de diagnóstico con mock.
-4. Revisar el JSON que imprime antes de enviarlo al LLM.
-5. Ajustar prompts en `prompts/` si la respuesta no es la esperada.
-6. Correr `pytest tests/ -v` y asegurar 100% de tests pasando.
-7. Iniciar Fase 3: reemplazar `vision_mock.py` por `vision_opencv.py`.
-
----
-
-## Equipo
-
-| Rol | Integrante |
-|---|---|
-| Director del Proyecto | Leonardo Pérez Sandoval |
-| Líder Técnico / Arquitecto | David Leitón Flores |
-| Investigador(a) / Auditor(a) | Josué Hernández Medina |
+Restricción crítica: CUDA 10.2 únicamente. CUDA 11.x es incompatible con Jetson Nano B01 / Tegra X1.
 
 Facilitador: Dr. Ing. Johan Carvajal Godínez — TEC · CEDA · IS-2026
