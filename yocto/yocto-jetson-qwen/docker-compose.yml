@@ -1,0 +1,117 @@
+version: '3.8'
+
+# Docker Compose para Yocto-Qwen2.5:3b Build System
+# Correcciones: memory y restart como strings
+
+services:
+  builder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    
+    image: yocto-qwen:latest
+    container_name: yocto-qwen-builder
+    
+    # Recursos
+    deploy:
+      resources:
+        limits:
+          cpus: '4'         # String
+          memory: "32G"     # String (sin límite real con valores altos)
+        reservations:
+          cpus: '4'
+          memory: "16G"
+    
+    # Red
+    networks:
+      - yocto-net
+    
+    # Variables de entorno
+    environment:
+      # BitBake
+      BB_NUMBER_THREADS: "14"
+      PARALLEL_MAKE: "-j14"
+      SSTATE_DIR: "/yocto/sstate"
+      DL_DIR: "/yocto/dl"
+      
+      # Optimizaciones
+      BB_HASHSERVE: "auto"
+      
+      # Sistema
+      LANG: "en_US.UTF-8"
+      LANGUAGE: "en_US:en"
+      LC_ALL: "en_US.UTF-8"
+      
+      # Yocto
+      DISTRO: "poky"
+      MACHINE: "jetson-nano-devkit"
+      
+      # Qwen
+      QWEN_MODEL: "Qwen/Qwen2.5-3B-Instruct"
+    
+    # Volúmenes
+    volumes:
+      # Tu repositorio (donde copias los 4 archivos)
+      - .:/yocto/repo:rw
+      
+      # Directorios de build (importante: persistencia)
+      - yocto-build:/yocto/build
+      - yocto-downloads:/yocto/dl
+      - yocto-sstate:/yocto/sstate
+      - yocto-output:/yocto/output
+    
+    # Terminal interactivo
+    stdin_open: true
+    tty: true
+    
+    # Reinicio (como string)
+    restart: "no"
+    
+    # Limites del sistema
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 8192
+      nproc:
+        soft: 4096
+        hard: 8192
+    
+    # Entrypoint
+    entrypoint: /entrypoint.sh
+    command: bash
+    
+    # Working directory
+    working_dir: /yocto/repo
+
+volumes:
+  yocto-build:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/volumes/build
+  
+  yocto-downloads:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/volumes/dl
+  
+  yocto-sstate:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/volumes/sstate
+  
+  yocto-output:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/volumes/output
+
+networks:
+  yocto-net:
+    driver: bridge
