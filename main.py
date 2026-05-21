@@ -1,16 +1,15 @@
 """
 main.py -- Orquestador principal AGRI-EDGE-IA
 
-Correcciones aplicadas:
-  1. Timeout subido a 120s para evitar fallos en contextos grandes.
-  2. PALABRAS_MANEJO agregado al detector de intent para cubrir
-     consultas sobre almacenamiento, semilla, postcosecha.
-  3. Consulta libre [L] no solicita datos de suelo ni vision mock.
-     Solo pregunta la etapa y usa el RAG como contexto principal.
+VERSIÓN MEJORADA:
+- Entrada de voz integrada como ALTERNATIVA (no opción separada)
+- En cada modalidad [1,2,3,L] se pregunta: ¿Escribir o grabar?
+- Menú más limpio
 """
 
 import logging
 import sys
+
 
 import yaml
 
@@ -50,10 +49,7 @@ PALABRAS_MANEJO = {
 
 
 def detectar_modo(texto: str) -> str:
-    """
-    Detecta el modo segun palabras clave.
-    El orden importa: diagnostico tiene prioridad.
-    """
+    """Detecta el modo segun palabras clave."""
     palabras = set(
         texto.lower()
         .replace(",", " ").replace(".", " ").replace("?", " ")
@@ -91,7 +87,7 @@ def mostrar_menu():
     print("  [1] Diagnostico fitosanitario")
     print("  [2] Riego y fertilizacion")
     print("  [3] Analisis economico")
-    print("  [L] Consulta libre (escribir pregunta)")
+    print("  [L] Consulta libre")
     print("  [q] Salir")
 
 
@@ -110,6 +106,7 @@ def main():
     from modules.persistence import AgriDatabase
     from modules.rag_retriever import RAGRetriever
     from modules import cli
+    from modules.input_handler import solicitar_entrada, vocalizar_respuesta
 
     # ── Inicializar servicios ────────────────────────────────────────────────
     ollama_cfg = cfg["ollama"]
@@ -162,14 +159,51 @@ def main():
 
         if opcion == "1":
             modo = "diagnostico_fitosanitario"
+            # Solicitar consulta (texto o voz)
+            pregunta_libre = solicitar_entrada(
+                "\n¿Cuál es tu consulta sobre el diagnóstico?",
+                modo="texto_o_voz"
+            )
+            if not pregunta_libre:
+                print("Consulta vacía, volviendo al menú.")
+                continue
+            modo = detectar_modo(pregunta_libre)
+            print(f"  Modo detectado: {modo.replace('_', ' ')}")
+            
         elif opcion == "2":
             modo = "riego_fertilizacion"
+            # Solicitar consulta (texto o voz)
+            pregunta_libre = solicitar_entrada(
+                "\n¿Cuál es tu consulta sobre riego y fertilización?",
+                modo="texto_o_voz"
+            )
+            if not pregunta_libre:
+                print("Consulta vacía, volviendo al menú.")
+                continue
+            modo = detectar_modo(pregunta_libre)
+            print(f"  Modo detectado: {modo.replace('_', ' ')}")
+            
         elif opcion == "3":
             modo = "economia"
-        elif opcion == "l":
-            pregunta_libre = input("\nEscriba su consulta: ").strip()
+            # Solicitar consulta (texto o voz)
+            pregunta_libre = solicitar_entrada(
+                "\n¿Cuál es tu consulta sobre análisis económico?",
+                modo="texto_o_voz"
+            )
             if not pregunta_libre:
-                print("Consulta vacia, volviendo al menu.")
+                print("Consulta vacía, volviendo al menú.")
+                continue
+            modo = detectar_modo(pregunta_libre)
+            print(f"  Modo detectado: {modo.replace('_', ' ')}")
+            
+        elif opcion == "l":
+            # Consulta libre (texto o voz)
+            pregunta_libre = solicitar_entrada(
+                "\n¿Cuál es tu consulta?",
+                modo="texto_o_voz"
+            )
+            if not pregunta_libre:
+                print("Consulta vacía, volviendo al menú.")
                 continue
             modo = detectar_modo(pregunta_libre)
             print(f"  Modo detectado: {modo.replace('_', ' ')}")
@@ -178,9 +212,9 @@ def main():
             continue
 
         # ── Etapa fenologica ─────────────────────────────────────────────────
-        # En consulta libre no se pregunta la etapa, se usa vegetativo por defecto.
-        # Solo tiene sentido pedirla en modos guiados donde el contexto la necesita.
-        if pregunta_libre is None:
+        # En consulta libre, se usa vegetativo por defecto
+        # En modos guiados, se solicita
+        if opcion not in ("l",):
             etapas = ["emergencia", "vegetativo", "tuberizacion", "maduracion"]
             print(f"\nEtapas disponibles: {' | '.join(etapas)}")
             etapa_input = input("Etapa fenologica (Enter = vegetativo): ").strip().lower()
@@ -189,17 +223,13 @@ def main():
             etapa = "vegetativo"
 
         # ── Datos segun modo ─────────────────────────────────────────────────
-        # Consulta libre [L]: no pide suelo ni vision.
-        #   El RAG provee el contexto. El agricultor ya escribio su pregunta.
-        # Modo guiado (1, 2, 3): solicita todos los datos necesarios.
-
         suelo = {}
         costos = {}
         vision_result = None
         econ = {}
         riego = {}
 
-        if pregunta_libre is None:
+        if opcion not in ("l",):
             if modo in ("diagnostico_fitosanitario", "riego_fertilizacion"):
                 suelo = cli.solicitar_datos_suelo()
 
@@ -235,11 +265,8 @@ def main():
         rag_fragmentos = []
         if rag:
             if pregunta_libre:
-                # Consulta libre: usar la pregunta exacta del agricultor como query
-                # Esto recupera fragmentos sobre almacenamiento, semilla, etc.
                 rag_fragmentos = rag.retrieve(pregunta_libre, n=2)
             else:
-                # Modo guiado: usar query predefinida por modo
                 query_rag = ""
                 if vision_result:
                     query_rag += f" {vision_result.get('disease_detected', '')}"
@@ -298,15 +325,16 @@ def main():
         # ── Resultado ────────────────────────────────────────────────────────
         cli.mostrar_resultado(resultado, modo)
 
-        resumen = resultado.get("resumen", "")
-        if resumen:
-            print(f"\nResumen para audio TTS:\n  {resumen}")
-
         print(
             f"\n[Latencia: {resultado['latency_s']:.1f}s | "
             f"Tokens entrada: {resultado['prompt_tokens']} | "
             f"Tokens salida: {resultado['response_tokens']}]"
         )
+
+        # ── VOCALIZAR SI SE DESEA ────────────────────────────────────────────
+        if input("\n¿Vocalizar respuesta? [s/N]: ").strip().lower() == "s":
+            json_data = resultado.get("json_data")
+            vocalizar_respuesta(json_data)
 
         if input("\nOtra consulta? [s/N]: ").strip().lower() != "s":
             print("\nHasta luego.")

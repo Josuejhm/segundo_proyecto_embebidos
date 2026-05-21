@@ -4,7 +4,7 @@
 entorno: "local"
 
 # ── Modelo LLM ──────────────────────────────────────────────────────────────
-# CAMBIO: phi3:mini → qwen2.5:3b
+# CAMBIO: qwen2.5:3b → qwen2.5:3b
 # RAZÓN: qwen2.5:3b alucina mucho menos y sigue instrucciones JSON con precisión.
 # INSTALAR: ollama pull qwen2.5:3b
 ollama:

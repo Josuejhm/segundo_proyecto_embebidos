@@ -1,0 +1,154 @@
+# docker-compose.yml — AGRI-EDGE-IA Stack (FIXED - Audio Completo)
+# Servicios: Ollama (LLM) + AgriEdgeIA (aplicación con audio)
+# 
+# Características:
+# ✅ Audio capturado desde micrófono host
+# ✅ PulseAudio configurado correctamente
+# ✅ ALSA con acceso a dispositivos /dev/snd
+# ✅ FFmpeg para reproducción
+# ✅ Piper TTS para síntesis de voz offline
+
+version: '3.8'
+
+services:
+  # ── Ollama: LLM Server ─────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: agri-ollama
+    
+    # Puertos
+    ports:
+      - "11434:11434"
+    
+    # Volúmenes para persistencia
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./rag/documentos:/documents:ro
+    
+    # Recursos
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+    
+    # Variables de entorno
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+    
+    # Health check
+    healthcheck:
+      disable: true
+    
+    # Reinicio automático
+    restart: unless-stopped
+    
+    # Logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── AGRI-EDGE-IA: Aplicación Principal con Audio ────────────────────────
+  agri-edge-ia:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    
+    container_name: agri-edge-ia
+    
+    # Puertos
+    ports:
+      - "8000:8000"
+    
+    # ✅ CRÍTICO: Mapeo de dispositivos de audio
+    devices:
+      # ALSA devices para grabación/reproducción
+      - /dev/snd:/dev/snd          # Dispositivos de sonido
+      - /dev/dsp:/dev/dsp          # DSP (Digital Signal Processing)
+    
+    # ✅ Privileged + IPC para audio en Docker
+    privileged: true
+    ipc: host
+    
+    # ✅ User ID para PulseAudio (si está disponible en host)
+    user: "1000"
+    
+    # Volúmenes
+    volumes:
+      # Código (para desarrollo)
+      - .:/app
+      
+      # Datos persistentes
+      - ./data/db:/app/data/db
+      - ./data/logs:/app/data/logs
+      - ./data/audio:/app/data/audio
+      - ./rag/index:/app/rag/index
+      
+      # ✅ PulseAudio socket (si el host lo tiene)
+      - /run/user/1000/pulse:/run/user/1000/pulse:ro
+      
+      # ✅ ALSA configuration
+      - /etc/asound.conf:/etc/asound.conf:ro
+    
+    # Dependencia en Ollama
+    depends_on:
+      ollama:
+        condition: service_started
+    
+    # ✅ Variables de entorno para audio
+    environment:
+      # Ollama
+      - OLLAMA_HOST=http://ollama:11434
+      
+      # Audio - ALSA
+      - ALSA_CARD=default
+      - ALSA_DEVICE=default
+      
+      # Audio - PulseAudio
+      - PULSE_SERVER=unix:/run/user/1000/pulse/native
+      - PULSEAUDIO_PROP_MEDIA_NAME=AGRI-EDGE-IA
+      
+      # Aplicación
+      - ENVIRONMENT=docker
+      - LOG_LEVEL=INFO
+      - PYTHONUNBUFFERED=1
+    
+    # Recursos
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 3G
+        reservations:
+          cpus: '1.0'
+          memory: 1.5G
+    
+    # Keep running
+    stdin_open: true
+    tty: true
+    
+    # Reinicio
+    restart: unless-stopped
+    
+    # Logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+# ── Volúmenes Persistentes ───────────────────────────────────────────────
+volumes:
+  ollama_data:
+    driver: local
+
+# ── Networks ─────────────────────────────────────────────────────────────
+networks:
+  default:
+    name: agri-network
+    driver: bridge

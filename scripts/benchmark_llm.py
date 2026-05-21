@@ -12,7 +12,7 @@ Métricas recolectadas:
 
 Uso:
   python scripts/benchmark_llm.py
-  python scripts/benchmark_llm.py --runs 5 --model phi3:mini
+  python scripts/benchmark_llm.py --runs 5 --model qwen2.5:3b
   python scripts/benchmark_llm.py --show-response   # imprime respuesta cruda
 """
 
@@ -167,8 +167,8 @@ def ejecutar_caso(host, model, timeout, prompt, show_response=False):
 
 def main():
     parser = argparse.ArgumentParser(description="Benchmark LLM -- AGRI-EDGE-IA")
-    parser.add_argument("--host", default="http://localhost:11434")
-    parser.add_argument("--model", default="phi3:mini")
+    parser.add_argument("--host", default="http://ollama:11434")
+    parser.add_argument("--model", default="qwen2.5:3b")
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--show-response", action="store_true")

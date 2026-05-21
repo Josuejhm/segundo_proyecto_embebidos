@@ -1,12 +1,48 @@
-# AGRI-EDGE-IA — Dependencias mínimas
+# AGRI-EDGE-IA — Dependencias mínimas (ACTUALIZADO - CORREGIDO AUDIO)
 # Compatible con Python 3.9+ y Jetson Nano (ARM64)
 # NO incluir dependencias que requieran CUDA 11.x
 
+# --- CORE ---
 requests>=2.28.0        # HTTP client para API Ollama
 pyyaml>=6.0             # Lectura de configuración
 python-dotenv>=1.0.1    # Variables de entorno
 rich>=13.0.0            # CLI con formato visual
 # SQLite3 viene incluido en Python stdlib
 
-# --- Opcional para pruebas ---
+# --- TEST ---
 pytest>=9.0.2
+
+# --- RAG (Retrieval-Augmented Generation) ---
+chromadb>=0.4.0
+sentence-transformers>=2.2.0
+
+# --- VOZ (FIXED AUDIO) ---
+# STT (Speech-to-Text)
+openai-whisper>=20231117
+
+# TTS (Text-to-Speech) - PRIMARIO: Piper (offline, embedded-friendly)
+piper-tts>=1.2.0
+
+# Fallback TTS si Piper no está disponible (requiere internet)
+# gtts>=2.3.0  # Descomenta si necesitas Google TTS
+
+# Captura de Audio
+sounddevice>=0.4.5
+
+# --- NOTAS ---
+# Instalación para desarrollo:
+#   pip install --upgrade pip
+#   pip install -r requirements.txt
+#
+# Para Jetson Nano (optimizado):
+#   pip install --upgrade pip setuptools wheel
+#   pip install -r requirements.txt --no-cache-dir
+#
+# Para Piper TTS ejecutable:
+#   pip install piper-tts
+#   piper --help
+#
+# Para debug de audio:
+#   arecord -l          (lista dispositivos ALSA)
+#   ffplay -version     (verifica FFmpeg)
+#   paplay --version    (verifica PulseAudio)

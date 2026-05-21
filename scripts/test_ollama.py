@@ -7,7 +7,7 @@ el modelo esté disponible y que responde a un prompt agrícola mínimo.
 Uso:
   python scripts/test_ollama.py
   python scripts/test_ollama.py --model tinyllama   # alternativa liviana
-  python scripts/test_ollama.py --host http://localhost:11434
+  python scripts/test_ollama.py --host http://ollama:11434
 
 Criterios de aceptación (Fase 0):
   ✓ Conexión con Ollama establecida.
@@ -145,8 +145,8 @@ def test_json_response(host: str, model: str, timeout: int) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(description="Test de Ollama para AGRI-EDGE-IA")
-    parser.add_argument("--host", default="http://localhost:11434")
-    parser.add_argument("--model", default="phi3:mini")
+    parser.add_argument("--host", default="http://ollama:11434")
+    parser.add_argument("--model", default="qwen2.5:3b")
     parser.add_argument("--timeout", type=int, default=90)
     args = parser.parse_args()
 

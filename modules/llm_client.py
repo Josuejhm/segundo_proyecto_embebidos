@@ -1,25 +1,6 @@
-"""
-modules/llm_client.py
----------------------
-Cliente HTTP para la API REST de Ollama.
-
-CAMBIOS RESPECTO A VERSIÓN ANTERIOR:
-  1. Streaming real (stream=True)
-     El Jetson muestra tokens conforme llegan (~3-5s primer token)
-     en lugar de esperar la respuesta completa (20-30s en silencio).
-
-  2. Parser JSON robusto con balanceo de llaves
-     qwen2.5:3b a veces envuelve el JSON en ```json...```.
-     El parser anterior con rfind() fallaba en esos casos.
-
-  3. Separación automática JSON / resumen
-     Los prompts piden primero JSON y luego resumen en texto plano.
-     Este módulo separa ambas partes para que main.py pueda mostrar
-     el JSON en pantalla y enviar el resumen a TTS (Piper).
-"""
-
 import json
 import logging
+import os          # ← agregado para leer variables de entorno
 import re
 import time
 from typing import Optional
@@ -33,13 +14,16 @@ class OllamaClient:
 
     def __init__(
         self,
-        host: str,
-        model: str,
+        host: str = None,          # ← ahora opcional
+        model: str = "qwen2.5:3b",
         timeout: int = 60,
         num_predict: int = 300,
         temperature: float = 0.1,
         stream: bool = True,
     ):
+        # Si no se pasa host, usar la variable de entorno o por defecto "http://ollama:11434"
+        if host is None:
+            host = os.getenv("OLLAMA_HOST", "http://ollama:11434")
         self.host = host.rstrip("/")
         self.model = model
         self.timeout = timeout
@@ -83,7 +67,6 @@ class OllamaClient:
             "success": False,
             "error": None,
         }
-
         try:
             if self.stream:
                 result = self._generate_streaming(payload, result)
@@ -115,7 +98,6 @@ class OllamaClient:
         return result
 
     # ── Generación con streaming ─────────────────────────────────────────────
-
     def _generate_streaming(self, payload: dict, result: dict) -> dict:
         """
         Imprime cada token conforme llega desde Ollama.
@@ -146,7 +128,6 @@ class OllamaClient:
                         break
                 except json.JSONDecodeError:
                     continue
-
         print()  # nueva línea al terminar
         result["response"] = "".join(tokens)
         result["success"] = bool(result["response"].strip())
@@ -244,7 +225,6 @@ class OllamaClient:
         end_json = limpio.rfind("}")
         if end_json >= 0 and end_json < len(limpio) - 1:
             return limpio[end_json + 1:].strip()
-
         # Si no hay JSON, retornar el texto completo como resumen
         if not limpio.startswith("{"):
             return limpio
