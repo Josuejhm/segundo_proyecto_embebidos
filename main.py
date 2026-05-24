@@ -13,6 +13,8 @@ import sys
 
 import yaml
 
+from modules.vision_classifier import ClasificadorPapa
+
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     level=logging.INFO,
@@ -49,7 +51,6 @@ PALABRAS_MANEJO = {
 
 
 def detectar_modo(texto: str) -> str:
-    """Detecta el modo segun palabras clave."""
     palabras = set(
         texto.lower()
         .replace(",", " ").replace(".", " ").replace("?", " ")
@@ -61,9 +62,10 @@ def detectar_modo(texto: str) -> str:
         return "economia"
     if palabras & PALABRAS_RIEGO:
         return "riego_fertilizacion"
+    # PALABRAS_MANEJO → consulta_libre (no riego)
     if palabras & PALABRAS_MANEJO:
-        return "riego_fertilizacion"
-    return "diagnostico_fitosanitario"
+        return "consulta_libre"          # ← cambio aquí
+    return "consulta_libre"              # ← y el default también
 
 
 def cargar_config() -> dict:
@@ -101,7 +103,27 @@ def main():
     from modules.llm_client import OllamaClient
     from modules.context_builder import build_context, validate_context, context_to_json
     from modules.prompt_builder import build_llm_request
-    from modules.vision_mock import analyze as vision_analyze
+    from modules.vision_classifier import ClasificadorPapa
+    vision_cfg = cfg.get("vision", {})
+    mock_enabled = vision_cfg.get("mock_enabled", False)
+
+    if mock_enabled:
+        # Modo desarrollo/PC — usa escenarios sintéticos sin cámara ni modelo ONNX
+        # vision_mock expone analyze() como función, no como clase
+        from modules.vision_mock import analyze as _vision_mock_analyze
+        vision_analyze = lambda escenario=None, imagen_path=None: (
+            _vision_mock_analyze(image_path=imagen_path, escenario=escenario or "default")
+        )
+        logger.info("Vision: modo MOCK activo (mock_enabled=true en settings.yaml)")
+    else:
+        # Modo producción — modelo ONNX real (Jetson Nano)
+        _vision_clasificador = ClasificadorPapa()
+        vision_analyze = lambda escenario=None, imagen_path=None: (
+            _vision_clasificador.analizar(imagen_path).__dict__
+            if _vision_clasificador.disponible
+            else {"disease_detected": "sin modelo", "severity_index": 0.0,
+                  "descripcion_llm": "modelo no disponible"}
+        )
     from modules.agri_logic import calcular_riego, analizar_economia
     from modules.persistence import AgriDatabase
     from modules.rag_retriever import RAGRetriever
@@ -159,7 +181,6 @@ def main():
 
         if opcion == "1":
             modo = "diagnostico_fitosanitario"
-            # Solicitar consulta (texto o voz)
             pregunta_libre = solicitar_entrada(
                 "\n¿Cuál es tu consulta sobre el diagnóstico?",
                 modo="texto_o_voz"
@@ -167,12 +188,11 @@ def main():
             if not pregunta_libre:
                 print("Consulta vacía, volviendo al menú.")
                 continue
-            modo = detectar_modo(pregunta_libre)
-            print(f"  Modo detectado: {modo.replace('_', ' ')}")
-            
+            # modo fijo — el agricultor ya eligió [1]
+            print(f"  Modo: {modo.replace('_', ' ')}")
+
         elif opcion == "2":
             modo = "riego_fertilizacion"
-            # Solicitar consulta (texto o voz)
             pregunta_libre = solicitar_entrada(
                 "\n¿Cuál es tu consulta sobre riego y fertilización?",
                 modo="texto_o_voz"
@@ -180,12 +200,11 @@ def main():
             if not pregunta_libre:
                 print("Consulta vacía, volviendo al menú.")
                 continue
-            modo = detectar_modo(pregunta_libre)
-            print(f"  Modo detectado: {modo.replace('_', ' ')}")
-            
+            # modo fijo — el agricultor ya eligió [2]
+            print(f"  Modo: {modo.replace('_', ' ')}")
+
         elif opcion == "3":
             modo = "economia"
-            # Solicitar consulta (texto o voz)
             pregunta_libre = solicitar_entrada(
                 "\n¿Cuál es tu consulta sobre análisis económico?",
                 modo="texto_o_voz"
@@ -193,11 +212,11 @@ def main():
             if not pregunta_libre:
                 print("Consulta vacía, volviendo al menú.")
                 continue
-            modo = detectar_modo(pregunta_libre)
-            print(f"  Modo detectado: {modo.replace('_', ' ')}")
-            
+            # modo fijo — el agricultor ya eligió [3]
+            print(f"  Modo: {modo.replace('_', ' ')}")
+
         elif opcion == "l":
-            # Consulta libre (texto o voz)
+            # Consulta libre — aquí SÍ se detecta el modo por palabras clave
             pregunta_libre = solicitar_entrada(
                 "\n¿Cuál es tu consulta?",
                 modo="texto_o_voz"
@@ -277,10 +296,13 @@ def main():
 
         # ── Contexto JSON ────────────────────────────────────────────────────
         modo_prompt = "consulta_libre" if pregunta_libre else modo
+
+        # Para context_builder usar siempre un modo agrícola válido
+        modo_contexto = modo if modo in ("diagnostico_fitosanitario", "riego_fertilizacion", "economia") else "diagnostico_fitosanitario"
         try:
             suelo_valido = suelo if suelo and any(v is not None for v in suelo.values()) else None
             ctx = build_context(
-                modo=modo,
+                modo=modo_contexto,
                 etapa_fenologica=etapa,
                 suelo=suelo_valido,
                 vision_result=vision_result,

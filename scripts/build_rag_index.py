@@ -1,212 +1,262 @@
+#!/usr/bin/env python3
 """
-scripts/build_rag_index.py
---------------------------
-Construye el índice vectorial RAG a partir de los documentos en rag/documentos/.
+build_rag_index.py — Construcción del índice RAG para AGRI-EDGE-IA
+-----------------------------------------------------------------------
+Estrategia: TF-IDF (sklearn) + similitud coseno (numpy)
+  - Sin descargas de modelos → funciona offline en Jetson Nano
+  - Ligero en RAM (~20 MB vs ~400 MB de sentence-transformers)
+  - Vectores persistidos como embeddings.npy + docs.json
 
-CUÁNDO EJECUTAR:
-  - Una sola vez en la PC de desarrollo, ANTES de armar la imagen Yocto.
-  - Cada vez que se actualicen los documentos de rag/documentos/.
-  - NUNCA en el Jetson Nano (el índice se copia como archivo estático).
+Salida en rag/index/:
+  docs.json        — chunks de texto con metadatos
+  embeddings.npy   — matriz TF-IDF (n_chunks × vocab)
+  vectorizer.pkl   — vectorizador ajustado (para query-time)
 
-POR QUÉ EN PC Y NO EN JETSON:
-  Generar embeddings para todos los chunks toma 2-5 minutos en CPU.
-  En Jetson sería más lento y consumiría RAM que necesita el LLM.
-  El índice resultante (rag/index/chroma.sqlite3) va en la imagen Yocto
-  como cualquier otro archivo estático.
-
-FLUJO:
-  1. Lee todos los .txt de rag/documentos/
-  2. Los divide en chunks de 200 palabras con overlap de 30
-  3. Genera embeddings con all-MiniLM-L6-v2 (80 MB, corre en CPU)
-  4. Guarda en ChromaDB con backend SQLite en rag/index/
-
-USO:
-  pip install chromadb sentence-transformers
-  python scripts/build_rag_index.py
-  python scripts/build_rag_index.py --docs-dir rag/documentos --index-dir rag/index
-  python scripts/build_rag_index.py --test   # verifica con 3 queries de prueba
+Uso:
+  python3 scripts/build_rag_index.py
+  python3 scripts/build_rag_index.py --docs-dir rag/documentos --index-dir rag/index
 """
 
 import argparse
-import logging
+import json
 import os
+import pickle
+import re
 import sys
-import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
-
-CHUNK_SIZE_PALABRAS = 200   # palabras por fragmento
-CHUNK_OVERLAP = 30          # palabras de solapamiento entre fragmentos consecutivos
-COLLECTION_NAME = "agri_edge_cr"
-MODEL_NAME = "all-MiniLM-L6-v2"
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.preprocessing import normalize
 
 
-def leer_documentos(docs_dir: str) -> list[dict]:
-    """Lee todos los archivos .txt del directorio y retorna lista de {filename, content}."""
-    path = Path(docs_dir)
-    documentos = []
-    patrones = list(path.glob("*.txt")) + list(path.glob("*.md"))
-    for archivo in sorted(patrones, key=lambda x: x.name):
-        try:
-            contenido = archivo.read_text(encoding="utf-8")
-            documentos.append({"nombre": archivo.name, "contenido": contenido})
-            logger.info("  Leído: %s (%d chars)", archivo.name, len(contenido))
-        except Exception as e:
-            logger.warning("No se pudo leer %s: %s", archivo.name, e)
-    return documentos
+# ── Configuración de chunking ───────────────────────────────────────────────
+
+CHUNK_SIZE = 400          # palabras por chunk (aprox 2-3 párrafos)
+CHUNK_OVERLAP = 60        # palabras de solapamiento entre chunks
+MIN_CHUNK_WORDS = 30      # descartar chunks muy pequeños
 
 
-def dividir_en_chunks(texto: str, fuente: str,
-                       chunk_size: int = CHUNK_SIZE_PALABRAS,
-                       overlap: int = CHUNK_OVERLAP) -> list[dict]:
-    """
-    Divide el texto en chunks de tamaño fijo con overlap.
+# ── Utilidades de texto ─────────────────────────────────────────────────────
 
-    El overlap (solapamiento) garantiza que ideas que cruzan el límite entre
-    dos chunks no se pierdan. Si un chunk termina en medio de una frase,
-    el siguiente chunk repite las últimas 'overlap' palabras.
-    """
-    palabras = texto.split()
+def limpiar_markdown(texto: str) -> str:
+    """Elimina sintaxis Markdown manteniendo el contenido semántico."""
+    # Eliminar bloques de código
+    texto = re.sub(r"```[\s\S]*?```", " ", texto)
+    texto = re.sub(r"`[^`]+`", " ", texto)
+    # Convertir encabezados en texto plano (conservar para búsqueda)
+    texto = re.sub(r"^#{1,6}\s+", "", texto, flags=re.MULTILINE)
+    # Eliminar negritas/cursivas
+    texto = re.sub(r"\*{1,3}([^*]+)\*{1,3}", r"\1", texto)
+    texto = re.sub(r"_{1,3}([^_]+)_{1,3}", r"\1", texto)
+    # Eliminar links pero conservar texto
+    texto = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", texto)
+    # Eliminar tablas (bordes)
+    texto = re.sub(r"^\|[-: |]+\|$", "", texto, flags=re.MULTILINE)
+    texto = re.sub(r"\|", " ", texto)
+    # Limpiar espacios múltiples
+    texto = re.sub(r"\n{3,}", "\n\n", texto)
+    texto = re.sub(r" {2,}", " ", texto)
+    return texto.strip()
+
+
+def palabras(texto: str) -> list[str]:
+    return texto.split()
+
+
+def chunk_por_palabras(texto: str, chunk_size: int, overlap: int) -> list[str]:
+    """Divide texto en chunks de N palabras con solapamiento."""
+    ws = palabras(texto)
     chunks = []
     inicio = 0
-
-    while inicio < len(palabras):
-        fin = min(inicio + chunk_size, len(palabras))
-        chunk_texto = " ".join(palabras[inicio:fin])
-        chunks.append({
-            "texto": chunk_texto,
-            "fuente": fuente,
-            "chunk_inicio": inicio,
-            "chunk_fin": fin,
-        })
-        if fin >= len(palabras):
-            break
+    while inicio < len(ws):
+        fin = min(inicio + chunk_size, len(ws))
+        chunk = " ".join(ws[inicio:fin])
+        if len(palabras(chunk)) >= MIN_CHUNK_WORDS:
+            chunks.append(chunk)
         inicio += chunk_size - overlap
-
     return chunks
 
 
-def construir_indice(docs_dir: str, index_dir: str) -> None:
-    """Construye el índice ChromaDB completo."""
-    try:
-        import chromadb
-        from sentence_transformers import SentenceTransformer
-    except ImportError:
-        logger.error("Instalar dependencias: pip install chromadb sentence-transformers")
+def chunk_por_secciones(texto: str, chunk_size: int, overlap: int) -> list[tuple[str, str]]:
+    """
+    Chunking inteligente: divide en secciones Markdown primero,
+    luego subdivide si la sección es muy larga.
+    Retorna lista de (titulo_seccion, texto_chunk).
+    """
+    # Dividir por encabezados
+    partes = re.split(r"(^#{1,4}\s+.+$)", texto, flags=re.MULTILINE)
+    
+    resultado = []
+    titulo_actual = "Inicio"
+    buffer = ""
+    
+    for parte in partes:
+        if re.match(r"^#{1,4}\s+", parte):
+            # Es un encabezado — vaciar buffer anterior
+            if buffer.strip():
+                sub = chunk_por_palabras(limpiar_markdown(buffer), chunk_size, overlap)
+                for s in sub:
+                    resultado.append((titulo_actual, s))
+            titulo_actual = re.sub(r"^#+\s+", "", parte).strip()
+            buffer = ""
+        else:
+            buffer += parte
+    
+    # Último buffer
+    if buffer.strip():
+        sub = chunk_por_palabras(limpiar_markdown(buffer), chunk_size, overlap)
+        for s in sub:
+            resultado.append((titulo_actual, s))
+    
+    return resultado
+
+
+# ── Carga de documentos ─────────────────────────────────────────────────────
+
+def cargar_documentos(docs_dir: Path) -> list[dict]:
+    """Carga todos los .md y .txt del directorio."""
+    archivos = sorted(docs_dir.glob("*.md")) + sorted(docs_dir.glob("*.txt"))
+    
+    if not archivos:
+        print(f"  ✗ No se encontraron archivos en {docs_dir}", file=sys.stderr)
         sys.exit(1)
+    
+    docs = []
+    for archivo in archivos:
+        print(f"  Cargando: {archivo.name}")
+        texto = archivo.read_text(encoding="utf-8", errors="ignore")
+        chunks = chunk_por_secciones(texto, CHUNK_SIZE, CHUNK_OVERLAP)
+        
+        for i, (titulo, chunk_texto) in enumerate(chunks):
+            if len(palabras(chunk_texto)) < MIN_CHUNK_WORDS:
+                continue
+            docs.append({
+                "id": f"{archivo.stem}__chunk{i:03d}",
+                "fuente": archivo.name,
+                "seccion": titulo,
+                "texto": chunk_texto,
+            })
+        
+        print(f"    → {len(chunks)} chunks generados")
+    
+    return docs
 
-    # Limpiar índice anterior si existe
-    index_path = Path(index_dir)
-    if index_path.exists():
-        import shutil
-        shutil.rmtree(index_path)
-        logger.info("Índice anterior eliminado.")
-    index_path.mkdir(parents=True, exist_ok=True)
 
-    # Inicializar ChromaDB con backend SQLite persistente
-    client = chromadb.PersistentClient(path=str(index_path))
-    collection = client.create_collection(
-        name=COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine"},  # distancia coseno para similitud semántica
+# ── Construcción del índice ─────────────────────────────────────────────────
+
+def construir_indice(docs: list[dict], index_dir: Path):
+    """Ajusta TF-IDF y guarda embeddings + metadatos."""
+    textos = [d["texto"] for d in docs]
+    
+    print(f"\n  Ajustando TF-IDF sobre {len(textos)} chunks...")
+    
+    vectorizer = TfidfVectorizer(
+        analyzer="word",
+        ngram_range=(1, 2),        # unigramas + bigramas para frases clave
+        max_features=8000,         # límite de vocabulario (RAM Jetson)
+        sublinear_tf=True,         # log(tf) para balancear frecuencias
+        min_df=1,                  # con corpus pequeño, no filtrar
+        strip_accents="unicode",
+        lowercase=True,
     )
-
-    # Cargar modelo de embeddings
-    logger.info("Cargando modelo de embeddings '%s'...", MODEL_NAME)
-    t0 = time.time()
-    model = SentenceTransformer(MODEL_NAME)
-    logger.info("Modelo cargado en %.1fs", time.time() - t0)
-
-    # Leer documentos y generar chunks
-    documentos = leer_documentos(docs_dir)
-    if not documentos:
-        logger.error("No se encontraron archivos .txt en '%s'", docs_dir)
-        sys.exit(1)
-
-    todos_chunks = []
-    for doc in documentos:
-        chunks = dividir_en_chunks(doc["contenido"], doc["nombre"])
-        todos_chunks.extend(chunks)
-        logger.info("  %s → %d chunks", doc["nombre"], len(chunks))
-
-    logger.info("Total: %d chunks a indexar.", len(todos_chunks))
-
-    # Generar embeddings y guardar en ChromaDB por lotes
-    BATCH = 32
-    total_guardados = 0
-    t0 = time.time()
-
-    for i in range(0, len(todos_chunks), BATCH):
-        lote = todos_chunks[i:i + BATCH]
-        textos = [c["texto"] for c in lote]
-        embeddings = model.encode(textos).tolist()
-
-        collection.add(
-            ids=[f"chunk_{i + j}" for j in range(len(lote))],
-            embeddings=embeddings,
-            documents=textos,
-            metadatas=[{"source": c["fuente"], "start": c["chunk_inicio"]} for c in lote],
-        )
-        total_guardados += len(lote)
-        logger.info("  Indexados %d/%d chunks...", total_guardados, len(todos_chunks))
-
-    elapsed = time.time() - t0
-    logger.info("Índice construido: %d fragmentos en %.1fs", total_guardados, elapsed)
-    logger.info("   Guardado en: %s", index_path.resolve())
+    
+    matriz = vectorizer.fit_transform(textos)   # sparse (n_chunks × vocab)
+    # Normalizar a longitud unitaria (cosine similarity = dot product)
+    matriz_norm = normalize(matriz, norm="l2")
+    embeddings = matriz_norm.toarray().astype(np.float32)
+    
+    print(f"  Vocabulario: {len(vectorizer.vocabulary_)} términos")
+    print(f"  Matriz embeddings: {embeddings.shape} — "
+          f"{embeddings.nbytes / 1024:.1f} KB en RAM")
+    
+    # Guardar
+    index_dir.mkdir(parents=True, exist_ok=True)
+    
+    np_path = index_dir / "embeddings.npy"
+    np.save(np_path, embeddings)
+    
+    docs_path = index_dir / "docs.json"
+    with open(docs_path, "w", encoding="utf-8") as f:
+        json.dump(docs, f, ensure_ascii=False, indent=2)
+    
+    vect_path = index_dir / "vectorizer.pkl"
+    with open(vect_path, "wb") as f:
+        pickle.dump(vectorizer, f)
+    
+    print(f"\n  Archivos generados en {index_dir}:")
+    for p in sorted(index_dir.iterdir()):
+        print(f"    {p.name:30s}  {p.stat().st_size / 1024:.1f} KB")
+    
+    return embeddings, vectorizer, docs
 
 
-def verificar_indice(index_dir: str) -> None:
-    """Ejecuta 3 queries de prueba para verificar que el índice funciona."""
-    from modules.rag_retriever import RAGRetriever
+# ── Prueba de recuperación ──────────────────────────────────────────────────
 
-    retriever = RAGRetriever(index_path=index_dir)
-    if not retriever.disponible:
-        logger.error("Índice no disponible para verificación.")
-        return
+def probar_query(query: str, embeddings: np.ndarray,
+                 vectorizer, docs: list[dict], top_k: int = 3):
+    """Recupera los top-k chunks más relevantes para una consulta."""
+    q_vec = vectorizer.transform([query])
+    q_norm = normalize(q_vec, norm="l2").toarray().astype(np.float32)
+    scores = embeddings @ q_norm.T       # dot product = cosine (ya normalizados)
+    scores = scores.flatten()
+    top_idx = scores.argsort()[::-1][:top_k]
+    
+    print(f"\n  Query: '{query}'")
+    print(f"  {'─' * 60}")
+    for rank, idx in enumerate(top_idx, 1):
+        doc = docs[idx]
+        print(f"  [{rank}] score={scores[idx]:.3f}  {doc['fuente']}")
+        print(f"      Sección: {doc['seccion']}")
+        print(f"      Texto: {doc['texto'][:160].strip()}...")
+        print()
 
-    queries_prueba = [
-        "manchas negras en hojas de papa tizón tardío",
-        "cuánta agua necesita la papa en tuberización",
-        "precio de la papa en PIMA Costa Rica",
-    ]
 
-    print("\n" + "=" * 60)
-    print("  VERIFICACIÓN DEL ÍNDICE RAG")
-    print("=" * 60)
-
-    for query in queries_prueba:
-        print(f"\n🔍 Query: '{query}'")
-        resultados = retriever.retrieve(query, n=2)
-        for r in resultados:
-            print(f"   Fuente: {r['fuente']}")
-            print(f"   Texto:  {r['texto'][:120]}...")
-        if not resultados:
-            print("Sin resultados relevantes")
-
-    print("\n Verificación completada.")
-
+# ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Construye el índice RAG para AGRI-EDGE-IA")
-    parser.add_argument("--docs-dir", default="rag/documentos")
-    parser.add_argument("--index-dir", default="rag/index")
-    parser.add_argument("--test", action="store_true",
-                        help="Solo verificar el índice existente, no reconstruir")
+    parser = argparse.ArgumentParser(description="Construye índice RAG para AGRI-EDGE-IA")
+    parser.add_argument("--docs-dir", default="rag/documentos",
+                        help="Directorio con documentos .md/.txt")
+    parser.add_argument("--index-dir", default="rag/index",
+                        help="Directorio de salida del índice")
+    parser.add_argument("--no-test", action="store_true",
+                        help="Omitir pruebas de recuperación")
     args = parser.parse_args()
-
-    if args.test:
-        verificar_indice(args.index_dir)
-    else:
-        logger.info("Construyendo índice RAG...")
-        logger.info("  Documentos: %s", args.docs_dir)
-        logger.info("  Índice:     %s", args.index_dir)
-        construir_indice(args.docs_dir, args.index_dir)
-        verificar_indice(args.index_dir)
-        print("\n Para Yocto: copiar la carpeta 'rag/index/' en la imagen como archivo estático.")
-        print("   Ruta destino en Jetson: /opt/agri-edge-ia/rag/index/")
+    
+    docs_dir = Path(args.docs_dir)
+    index_dir = Path(args.index_dir)
+    
+    print("=" * 65)
+    print("  AGRI-EDGE-IA — Build RAG Index")
+    print("=" * 65)
+    print(f"\n  Documentos: {docs_dir.resolve()}")
+    print(f"  Índice:     {index_dir.resolve()}\n")
+    
+    # 1. Cargar documentos
+    print("▶ Paso 1: Cargar y chunkear documentos")
+    docs = cargar_documentos(docs_dir)
+    print(f"\n  Total chunks: {len(docs)}")
+    
+    # 2. Construir índice
+    print("\n▶ Paso 2: Construir índice TF-IDF")
+    embeddings, vectorizer, docs = construir_indice(docs, index_dir)
+    
+    # 3. Pruebas de recuperación
+    if not args.no_test:
+        print("\n▶ Paso 3: Pruebas de recuperación")
+        queries = [
+            "tizón tardío manchas hojas papa síntomas",
+            "costo producción kilogramo papa precio mercado",
+            "riego fertilización nitrógeno etapa fenológica",
+            "almacenamiento post cosecha tuberculo calidad",
+        ]
+        for q in queries:
+            probar_query(q, embeddings, vectorizer, docs, top_k=2)
+    
+    print("=" * 65)
+    print("  ✓ Índice construido exitosamente")
+    print("=" * 65)
 
 
 if __name__ == "__main__":
