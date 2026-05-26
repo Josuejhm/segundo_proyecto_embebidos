@@ -1,0 +1,29 @@
+# =============================================================================
+# jetson-nano-sd-card.wks.in — Layout de particiones para Jetson Nano SD
+# =============================================================================
+# Coloca este archivo en:
+#   /yocto/layers/meta-tegra/wic/jetson-nano-sd-card.wks.in
+#
+# Flashear con:
+#   sudo dd if=*.wic of=/dev/sdX bs=4M status=progress conv=fsync
+#
+# Resultado esperado en lsblk:
+#   sdX
+#   ├─sdX1  512M   FAT32  /boot  (kernel + DTB + extlinux.conf)
+#   └─sdX2  ~29GB  ext4   /      (rootfs AGRI-EDGE-IA)
+# =============================================================================
+
+part /boot --source bootimg-partition \
+           --ondisk mmcblk1 \
+           --fstype=vfat \
+           --label boot \
+           --active \
+           --align 4096 \
+           --fixed-size 512M
+
+part / --source rootfs \
+       --ondisk mmcblk1 \
+       --fstype=ext4 \
+       --label rootfs \
+       --align 4096 \
+       --extra-space 4096M

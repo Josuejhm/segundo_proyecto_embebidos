@@ -1,0 +1,63 @@
+# .dockerignore - Archivos a excluir del contexto de build Docker
+
+# Build outputs (muy grandes)
+build/
+tmp/
+*.tar.gz
+*.tar.bz2
+
+# Cache Yocto
+sstate/
+dl/
+cache/
+
+# Volúmenes
+volumes/
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentación (no necesaria en imagen)
+*.md
+*.txt
+docs/
+README
+
+# IDE y herramientas
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.env
+.env.local
+
+# Archivos temporales
+*.log
+*.tmp
+*.pid
+*.sock
+
+# Otros
+.github/
+.dockerignore
+docker-compose.override.yml
+Makefile
+LICENSE
+CHANGELOG
+
+# Node, Python artifacts (si existen)
+node_modules/
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# Directorios específicos
+output/
+reports/
+metrics/
