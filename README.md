@@ -410,6 +410,8 @@ apt-get install -y libportaudio2
 pip install onnxruntime
 
 sudo apt-get install espeak-ng
+
+pip install onnxscript
 ## Equipo
 
 | Rol | Integrante |

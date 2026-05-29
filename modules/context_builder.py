@@ -3,22 +3,29 @@ modules/context_builder.py
 --------------------------
 Construye el contexto JSON compacto que se inyecta en cada llamada al LLM.
 
-CAMBIO PRINCIPAL respecto a versión anterior: integración del RAG.
-  Versión anterior: el contexto no tenía información local de Costa Rica.
-  Versión actual:   agrega campo 'contexto_local_cr' con fragmentos
-                    recuperados de los documentos en rag/documentos/.
+CAMBIOS EN ESTA VERSIÓN (adaptación Jetson 2 GB sin visión):
 
-  RAZÓN: qwen2.5:3b (como cualquier modelo pequeño offline) no conoce:
-    - Precios PIMA actuales en colones
-    - Variedades locales de papa (La Floresta)
-    - Productos SENASA autorizados en CR
-    - Condiciones climáticas de Tierra Blanca de Cartago
-  Con el RAG, la aplicación recupera esa información y la inyecta aquí.
+1. VISIÓN YA NO ES OBLIGATORIA EN diagnostico_fitosanitario:
+   - Antes: vision_result=None insertaba un bloque vacío pero presente.
+   - Ahora: vision_result siempre es None (módulo eliminado). El contexto
+     de diagnóstico se basa en la descripción textual del agricultor y
+     en los fragmentos RAG de enfermedades de papa en Costa Rica.
+   - El campo "vision" se mantiene en el JSON pero con estado="sin_camara"
+     para que el prompt sepa que no hay imagen disponible y no pida una.
 
-RESTRICCIÓN JETSON:
-  El contexto total (incluyendo fragmentos RAG) debe mantenerse bajo
-  1500 caracteres para que el prompt no supere ~500 tokens.
-  Más de 500 tokens de entrada → el LLM tarda más de 30s en Jetson.
+2. FRAGMENTOS RAG TRUNCADOS A 150 CARACTERES (antes 250):
+   - Razón: con qwen2.5:3b Q3_K_M y num_ctx=512, el presupuesto de tokens
+     es muy ajustado. 150 chars ≈ 35-40 tokens por fragmento.
+   - 250 chars → ~60 tokens → con n=1 el prompt puede superar 220 tokens.
+   - 150 chars → ~37 tokens → prompt seguro en ~190 tokens.
+
+3. ADVERTENCIA DE CONTEXTO REDUCIDA A 800 CHARS:
+   - El límite anterior de 1500 era para Jetson 4 GB con modelos más grandes.
+   - Con num_ctx=512, el prompt completo (plantilla + contexto) debe caber
+     en ~400 tokens. 800 chars de contexto JSON ≈ 200 tokens.
+
+4. validate_context() YA NO ADVIERTE sobre visión faltante:
+   - En esta versión es esperado y correcto que no haya datos de visión.
 """
 
 import json
@@ -27,24 +34,24 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-MODOS_VALIDOS = {"diagnostico_fitosanitario", "riego_fertilizacion", "economia"}
+MODOS_VALIDOS  = {"diagnostico_fitosanitario", "riego_fertilizacion", "economia"}
 ETAPAS_VALIDAS = {"emergencia", "vegetativo", "tuberizacion", "maduracion"}
 
 CULTIVO_DEFAULT = {
-    "tipo": "papa",
-    "variedad": "La Floresta",
+    "tipo":      "papa",
+    "variedad":  "La Floresta",
     "ubicacion": "Tierra Blanca de Cartago, Costa Rica",
 }
 
 
 def build_context(
-    modo: str,
-    etapa_fenologica: str,
-    suelo: Optional[dict] = None,
-    vision_result: Optional[dict] = None,
-    costos: Optional[dict] = None,
-    cultivo_override: Optional[dict] = None,
-    rag_fragmentos: Optional[list] = None,
+    modo:              str,
+    etapa_fenologica:  str,
+    suelo:             Optional[dict] = None,
+    vision_result:     Optional[dict] = None,   # Siempre None en esta versión
+    costos:            Optional[dict] = None,
+    cultivo_override:  Optional[dict] = None,
+    rag_fragmentos:    Optional[list] = None,
 ) -> dict:
     """
     Construye y valida el contexto JSON para el LLM.
@@ -53,11 +60,10 @@ def build_context(
         modo:              Modo activo del sistema.
         etapa_fenologica:  Estado fenológico del cultivo.
         suelo:             Dict con humedad_pct, ph, nitrogeno, fosforo, potasio.
-        vision_result:     Resultado del módulo de visión (real o mock).
+        vision_result:     Siempre None en esta versión (visión eliminada).
         costos:            Dict con datos económicos (modo economia).
         cultivo_override:  Sobreescribir campos del cultivo por defecto.
-        rag_fragmentos:    Lista de dicts {'fuente':str, 'texto':str}
-                           del RAGRetriever. None = funciona sin RAG.
+        rag_fragmentos:    Lista de dicts con fragmentos del RAGRetriever.
 
     Returns:
         Dict con el contexto listo para serializar como JSON.
@@ -72,14 +78,22 @@ def build_context(
         cultivo.update(cultivo_override)
 
     ctx: dict = {
-        "modo": modo,
+        "modo":    modo,
         "cultivo": cultivo,
     }
 
     # ── Datos específicos por modo ───────────────────────────────────────────
     if modo == "diagnostico_fitosanitario":
         ctx["suelo"] = _normalizar_suelo(suelo)
-        ctx["vision"] = vision_result if vision_result else _vision_sin_datos()
+        # En esta versión no hay cámara: se informa al LLM para que
+        # base el diagnóstico en la descripción textual del agricultor.
+        ctx["vision"] = {
+            "estado":       "sin_camara",
+            "nota":         "No hay imagen disponible. Basar diagnóstico en la descripción textual del campo 'pregunta'.",
+            "health_category":  "desconocido",
+            "disease_detected": "no evaluado",
+            "severity_index":   None,
+        }
 
     elif modo == "riego_fertilizacion":
         ctx["suelo"] = _normalizar_suelo(suelo)
@@ -87,19 +101,21 @@ def build_context(
     elif modo == "economia":
         ctx["costos"] = costos or {}
 
-    # ── Fragmentos RAG ───────────────────────────────────────────────────────
-    # Máximo 2 fragmentos, cada uno truncado a 250 chars.
+    # ── Fragmentos RAG ────────────────────────────────────────────────────────
+    # Máximo 1 fragmento, truncado a 150 chars.
     # RAZÓN DEL LÍMITE:
-    #   Cada fragmento agrega ~60-80 tokens al prompt.
-    #   Con n=2 el overhead es ~120-160 tokens, aceptable en Jetson.
-    #   Con n=3 o textos largos se supera el presupuesto de RAM del LLM.
+    #   Con num_ctx=512 en Jetson 2 GB, el presupuesto total del prompt es
+    #   ~400 tokens. La plantilla del modo ocupa ~120 tokens. El contexto
+    #   JSON base ocupa ~60-80 tokens. 150 chars de RAG ≈ 37 tokens.
+    #   Total: ~257 tokens → deja ~255 tokens para la respuesta (num_predict=80)
+    #   y margen de KV-cache. Si se usan 250 chars el total sube a ~300 tokens.
     if rag_fragmentos:
         ctx["contexto_local_cr"] = [
             {
-                "fuente": f["fuente"],
-                "info": f["texto"][:250],
+                "fuente": f.get("fuente", "desconocido"),
+                "info":   f.get("texto", "")[:150],  # REDUCIDO de 250 a 150
             }
-            for f in rag_fragmentos[:2]
+            for f in rag_fragmentos[:1]   # Máximo 1 fragmento
         ]
 
     total_chars = len(json.dumps(ctx, ensure_ascii=False))
@@ -120,6 +136,9 @@ def validate_context(ctx: dict) -> list:
     """
     Valida el contexto y retorna lista de advertencias.
     Retorna lista vacía si todo está correcto.
+
+    NOTA: No advierte sobre visión faltante porque en esta versión
+    es correcto y esperado no tener datos de visión.
     """
     advertencias = []
 
@@ -129,46 +148,35 @@ def validate_context(ctx: dict) -> list:
     if "cultivo" not in ctx:
         advertencias.append("Falta sección 'cultivo'.")
 
-    if (ctx.get("modo") == "diagnostico_fitosanitario"
-            and "vision" not in ctx):
-        advertencias.append("Modo diagnóstico sin datos de visión.")
+    if ctx.get("modo") == "economia" and not ctx.get("costos"):
+        advertencias.append("Modo economía sin datos de costos.")
 
     total_chars = len(json.dumps(ctx, ensure_ascii=False))
-    if total_chars > 1500:
+    # Umbral reducido a 800 chars para Jetson 2 GB con num_ctx=512
+    if total_chars > 800:
         advertencias.append(
-            f"Contexto largo ({total_chars} chars). "
-            "Puede presionar tokens en Jetson. "
-            "Reducir campos RAG o datos de suelo."
+            f"Contexto largo ({total_chars} chars > 800). "
+            "Riesgo de superar num_ctx=512 en Jetson 2 GB. "
+            "Reducir fragmentos RAG o datos de suelo."
         )
 
     return advertencias
 
 
-# ── Helpers privados ─────────────────────────────────────────────────────────
+# ── Helpers privados ──────────────────────────────────────────────────────────
 
 def _normalizar_suelo(suelo: Optional[dict]) -> dict:
     """Retorna suelo con valores por defecto para campos faltantes."""
     defaults = {
         "humedad_pct": None,
-        "ph": None,
-        "nitrogeno": "desconocido",
-        "fosforo": "desconocido",
-        "potasio": "desconocido",
+        "ph":          None,
+        "nitrogeno":   "desconocido",
+        "fosforo":     "desconocido",
+        "potasio":     "desconocido",
     }
     if suelo:
         defaults.update(suelo)
     return defaults
-
-
-def _vision_sin_datos() -> dict:
-    """Retorna un resultado de visión vacío cuando no hay imagen."""
-    return {
-        "health_category": "desconocido",
-        "disease_detected": "no evaluado",
-        "severity_index": None,
-        "confidence": None,
-        "observations": ["Sin imagen disponible."],
-    }
 
 
 def _validar(modo: str, etapa: str) -> None:

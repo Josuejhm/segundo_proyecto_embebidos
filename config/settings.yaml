@@ -1,35 +1,71 @@
+# ============================================================
 # AGRI-EDGE-IA — Configuración global
-# Cambiar 'entorno' para activar ajustes específicos: local | jetson
+# ============================================================
+# Cambiar 'entorno' según dónde corre el sistema:
+#   local       → PC de desarrollo, cualquier modelo grande
+#   jetson_2gb  → Jetson Nano 2 GB (modelo Q3_K_M, contexto corto)
+#
+# FLUJO DE OVERRIDES:
+#   1. Se leen los valores del bloque 'ollama' como base.
+#   2. Si entorno=jetson_2gb, se sobreescriben con 'jetson_2gb_overrides'.
+#   3. main.py llama a aplicar_overrides_jetson() al arrancar.
+# ============================================================
 
-entorno: "local"
+entorno: "local"   # Cambiar a "jetson_2gb" al flashear la imagen Yocto
 
-# ── Modelo LLM ──────────────────────────────────────────────────────────────
+# ── Modelo LLM base (desarrollo en PC) ──────────────────────────────────────
 ollama:
   host: "http://localhost:11434"
+  # En PC se puede usar el modelo más capaz disponible para comparar calidad.
+  # En Jetson 2 GB se fuerza a agri-qwen3b via jetson_2gb_overrides.
   model: "qwen2.5:3b"
-  timeout: 150
-  num_predict: 300        # CAMBIO: era 300 → 150 máximo 
-                          # Razón: 300 tok a 3-6 tok/s en Jetson = hasta 100s (viola RNF-012)
-                          # 150 tok es suficiente para diagnósticos agrícolas concisos
-  temperature: 0.1
-  stream: true
-
-# ── Overrides para Jetson Nano ───────────────────────────────────────────────
-jetson_overrides:
   timeout: 120
-  num_predict: 200       # CAMBIO: era 200 → 120 en Jetson
-                          # Razón: 120 tok a 4 tok/s = 30s (justo en el límite del RNF)
+  num_predict: 300
   temperature: 0.1
   stream: true
 
-# ── RAG ─────────────────────────────────────────────────────────────────────
+# ── Overrides para Jetson Nano 2 GB ─────────────────────────────────────────
+# Nombre del modelo: "agri-qwen3b" es el modelo custom creado con el Modelfile
+# que fija num_ctx=512. NO usar "qwen2.5:3b" directamente en Jetson porque
+# Ollama por defecto abre un contexto de 2048-4096 tokens y eso causa OOM.
+#
+# Presupuesto RAM con estos ajustes:
+#   OS Yocto + daemons:       ~200 MB
+#   Python + numpy + sklearn: ~180 MB
+#   Ollama runtime:           ~150 MB
+#   qwen2.5:3b Q3_K_M pesos:  ~1350 MB  (1.72 GB archivo, ~1.35 GB en RAM)
+#   KV-cache con num_ctx=512: ~58 MB
+#   RAG TF-IDF (n=1):        ~50 MB
+#   App + SQLite + buffers:   ~60 MB
+#   ─────────────────────────────────
+#   TOTAL ESTIMADO:           ~2048 MB  (límite exacto — sin margen de error)
+#   Con Piper TTS (pico):     +80 MB por ~10 segundos mientras habla
+#
+# NOTA CRÍTICA: num_ctx=512 es suficiente para prompts de 80-180 tokens.
+# Si se aumenta num_ctx el sistema entra en OOM silencioso (swap en microSD).
+jetson_2gb_overrides:
+  model: "agri-qwen3b"    # Modelo creado con: ollama create agri-qwen3b -f data/models/Modelfile.agri
+  timeout: 90             # 90s: 80 tokens × ~1 tok/s en Maxwell sin CUDA = margen amplio
+  num_predict: 80         # 80 tokens ≈ 3-4 oraciones, suficiente para diagnósticos concisos
+  temperature: 0.1
+  stream: false           # false: respuesta atómica, evita fragmentación de buffers en 2 GB
+
+# ── RAG (Recuperación Aumentada por Generación) ──────────────────────────────
+# Backend: TF-IDF + similitud coseno (offline, sin embeddings neuronales).
+# El índice se construye UNA VEZ en PC con: python scripts/build_rag_index.py
+# y se incluye como archivo estático en la imagen Yocto.
+#
+# n_resultados=1 es OBLIGATORIO en Jetson 2 GB:
+#   Cada fragmento RAG suma ~60-80 tokens al prompt.
+#   Con n=1 el prompt total queda en ~180-220 tokens → seguro.
+#   Con n=2 el prompt supera los 280 tokens y el KV-cache presiona la RAM.
 rag:
   habilitado: true
   index_path: "rag/index"
-  model_name: "all-MiniLM-L6-v2"
-  n_resultados: 2
+  model_name: "all-MiniLM-L6-v2"  # Ignorado en backend TF-IDF, solo documentado
+  n_resultados: 1                  # 1 en Jetson 2 GB, máximo 2 en desarrollo
 
-# ── Base de datos ────────────────────────────────────────────────────────────
+# ── Base de datos SQLite ─────────────────────────────────────────────────────
 base_datos:
   path: "data/db/agri_edge.db"
 
@@ -39,36 +75,42 @@ cultivo:
   variedad: "La Floresta"
   ubicacion: "Tierra Blanca de Cartago, Costa Rica"
 
-# ── Visión ───────────────────────────────────────────────────────────────────
+# ── Visión computacional ─────────────────────────────────────────────────────
+# ELIMINADO en esta versión para liberar ~400 MB RAM en Jetson 2 GB.
+# El módulo vision_classifier.py se mantiene en el repo pero NO se importa.
+# El diagnóstico fitosanitario funciona por descripción textual del agricultor.
 vision:
-  mock_enabled: true           # CAMBIO CRÍTICO: era true → false
-                                # Con true el sistema ignora la cámara y devuelve
-                                # datos inventados siempre. Nunca llegarías a probar
-                                # el sistema real.
-  model_path: "data/models/mobilenetv2_potato.onnx"
-  camera_source: "auto"         # "auto" → CSI en Jetson, USB en PC de desarrollo
-                                # Para forzar USB en pruebas: "0"
-                                # Para forzar un archivo de imagen: "data/samples/test.jpg"
-  confidence_threshold: 0.60   # Confianza mínima para aceptar el diagnóstico CNN
-  save_captures: true           # Guardar imagen de cada diagnóstico en data/images/
+  habilitado: false    # false = sin cámara, sin OpenCV, sin ONNX
 
-# ── Audio STT (voz → texto) ──────────────────────────────────────────────────
-# SECCIÓN NUEVA — input_handler.py la necesita para saber qué binario usar
+# ── STT — Entrada de voz (Whisper.cpp) ───────────────────────────────────────
+# ELIMINADO en esta versión:
+#   1. No se dispone de micrófono en el hardware actual.
+#   2. Whisper.cpp consume ~100 MB RAM adicional.
+#   3. La compatibilidad de auriculares/micrófonos USB en Yocto requiere
+#      configuración adicional de ALSA no probada aún.
+# El agricultor ingresa texto por teclado o pantalla táctil.
 whisper:
-  bin_path: "/usr/local/bin/whisper-cpp"  # Ruta del binario compilado
-  model_path: "data/models/ggml-tiny.bin" # tiny=75MB (rápido), base=145MB (mejor español)
-  language: "es"
-  duracion_grabacion_seg: 5               # Segundos que graba el micrófono
-  samplerate: 16000
+  habilitado: false
 
-# ── Audio TTS (texto → voz) ──────────────────────────────────────────────────
-# SECCIÓN NUEVA — input_handler.py necesita saber si TTS está habilitado
+# ── TTS — Salida de voz (Piper TTS) ─────────────────────────────────────────
+# CONSERVADO: el sistema habla las respuestas al agricultor.
+# Hardware probado: parlantes USB estándar de PC (chip CM108/CM109, UAC 1.0).
+# Piper se invoca como proceso CLI (subprocess.run), NO como daemon persistente.
+# Pico de RAM durante síntesis: ~80 MB por ~10 segundos → luego el proceso muere.
+#
+# Para que ALSA use el parlante USB en lugar de HDMI como salida por defecto,
+# se instala /etc/asound.conf con: defaults.pcm.card 1 / defaults.ctl.card 1
+# (ver meta-agri-edge/recipes-multimedia/alsa-config/)
 piper:
   habilitado: true
-  model_path: "data/models/es_ES-davefx-medium.onnx"  # Voz en español
+  model_path: "data/models/es_ES-davefx-medium.onnx"
+  config_path: "data/models/es_ES-davefx-medium.onnx.json"
   bin_path: "/usr/local/bin/piper"
+  # Longitud máxima del texto enviado al TTS.
+  # Textos más largos aumentan el tiempo de síntesis y el pico de RAM.
+  max_chars_tts: 200
 
 # ── Logs ─────────────────────────────────────────────────────────────────────
 logs:
   path: "data/agri_edge.log"
-  level: "INFO"
+  level: "INFO"   # DEBUG para ver el checklist de prompt_builder
