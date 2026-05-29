@@ -1,14 +1,11 @@
 """
-modules/prompt_builder.py — v4
+modules/prompt_builder.py — v5
 """
-import json
-import logging
+import json, logging
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
-
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
-
 PROMPT_FILES = {
     "diagnostico_fitosanitario": "diagnostico_fitosanitario.md",
     "riego_fertilizacion":       "riego_fertilizacion.md",
@@ -16,60 +13,83 @@ PROMPT_FILES = {
     "consulta_libre":            "consulta_libre.md",
 }
 
+_D = '"'  # comilla doble para los JSON dentro de los strings
+
 PROMPT_FALLBACK = {
-    "diagnostico_fitosanitario": (
-        "Sos asistente agrícola para papa en Costa Rica. Sin internet. Sin camara.\n"
-        "Respondés ÚNICAMENTE en español costarricense.\n"
-        "Usás SOLO el contexto JSON. NUNCA inventás enfermedades.\n\n"
-        "FORMATO OBLIGATORIO — exactamente 4 campos:\n"
-        "{\"causa\":\"NOMBRE ENFERMEDAD\",\"urgencia\":\"bajo|medio|alto|critico\","
-        "\"accion\":\"que hacer\",\"nota\":\"advertencia\"}\n\n"
-        "En 'causa' ponés el NOMBRE DE LA ENFERMEDAD, nunca el texto del síntoma.\n"
-        "SI no hay campo 'pregunta', respondé: "
-        "{\"causa\":\"sin datos\",\"urgencia\":\"bajo\","
-        "\"accion\":\"Describa los sintomas\",\"nota\":\"Sin descripcion no es posible diagnosticar\"}\n\n"
-        "manchas negras+humedad → tizon tardio Phytophthora infestans\n"
-        "pudricion → fusariosis Fusarium solani\n\n"
-        "CONTEXTO:\n{contexto_json}\n\nRESPUESTA:"
-    ),
-    "riego_fertilizacion": (
-        "Sos asistente agrícola para papa en Costa Rica. Sin internet.\n"
-        "Respondés ÚNICAMENTE en español costarricense.\n"
-        "Usás SOLO el contexto JSON. NUNCA inventás valores.\n\n"
-        "FORMATO OBLIGATORIO — exactamente 4 campos:\n"
-        "{\"frecuencia\":\"cada N dias o inmediato hoy\",\"urgencia\":\"baja|media|alta|desconocido\","
-        "\"fertilizacion\":\"producto o ninguna\",\"nota\":\"advertencia\"}\n\n"
-        "SI humedad_pct es null: {\"frecuencia\":\"sin datos\",\"urgencia\":\"desconocido\","
-        "\"fertilizacion\":\"sin datos\",\"nota\":\"Mida la humedad primero\"}\n\n"
-        "REGLA urgencia: humedad<40→alta, 40-60→media, >60→baja, null→desconocido\n\n"
-        "CONTEXTO:\n{contexto_json}\n\nRESPUESTA:"
-    ),
-    "economia": (
-        "Sos asistente agrícola para papa en Costa Rica. Sin internet.\n"
-        "Respondés ÚNICAMENTE en español costarricense.\n"
-        "Usás SOLO números del contexto JSON. NUNCA inventás cifras.\n\n"
-        "FORMATO OBLIGATORIO — exactamente 4 campos:\n"
-        "{\"margen\":NUMERO,\"decision\":\"vender_ahora|esperar|negociar|no_rentable|sin datos\","
-        "\"precio_kg\":NUMERO,\"nota\":\"justificacion\"}\n\n"
-        "SI costos vacío: {\"margen\":0,\"decision\":\"sin datos\",\"precio_kg\":0,"
-        "\"nota\":\"Ingrese los costos del ciclo\"}\n\n"
-        "REGLAS decision (en orden): costos vacío→sin datos. "
-        "margen_estimado_crc<0(NEGATIVO)→no_rentable. "
-        "margen<20pct costo→negociar. margen>=20pct→vender_ahora.\n"
-        "margen en respuesta = valor exacto de costos.margen_estimado_crc del contexto.\n\n"
-        "CONTEXTO:\n{contexto_json}\n\nRESPUESTA:"
-    ),
-    "consulta_libre": (
-        "Sos asistente agrícola para papa en Costa Rica. Sin internet.\n"
-        "Respondés ÚNICAMENTE en español costarricense.\n"
-        "Usás SOLO el contexto JSON. NUNCA inventás datos.\n\n"
-        "FORMATO OBLIGATORIO — exactamente 3 campos:\n"
-        "{\"respuesta\":\"en 1-2 oraciones\",\"fuente\":\"RAG o conocimiento base\","
-        "\"nota\":\"advertencia o ninguna\"}\n\n"
-        "SI no tenés datos: {\"respuesta\":\"No tengo datos suficientes.\","
-        "\"fuente\":\"ninguna\",\"nota\":\"ninguna\"}\n\n"
-        "CONTEXTO:\n{contexto_json}\n\nRESPUESTA:"
-    ),
+    "diagnostico_fitosanitario": "\n".join([
+        "MODO: Diagnostico papa Costa Rica. Sin internet. Sin camara.",
+        "Respondés en español. Usás SOLO el contexto JSON.",
+        "",
+        "TU RESPUESTA SIEMPRE EMPIEZA CON { Y TERMINA CON }",
+        "",
+        'EJEMPLO: {"causa":"tizon tardio Phytophthora infestans","urgencia":"critico","accion":"aplicar fungicida de cobre","nota":"consulte agronomo hoy"}',
+        "",
+        "REGLA: En causa ponés el NOMBRE de la enfermedad, nunca el texto del síntoma.",
+        'REGLA: manchas negras+humedad→causa:"tizon tardio Phytophthora infestans",urgencia:"critico"',
+        'REGLA: pudricion→causa:"fusariosis Fusarium solani",urgencia:"alto"',
+        'REGLA: amarillamiento sin manchas→causa:"deficiencia nutricional posible",urgencia:"medio"',
+        "REGLA: Usás tizón en español, nunca blight.",
+        "",
+        'SIN pregunta: {"causa":"sin datos","urgencia":"bajo","accion":"Describa sintomas visibles","nota":"sin sintomas no diagnostico"}',
+        "",
+        "Luego 1-2 oraciones. Final: Consulte agronomo.",
+        "",
+        "CONTEXTO:",
+        "{contexto_json}",
+        "",
+        "RESPUESTA:",
+    ]),
+
+    "riego_fertilizacion": "\n".join([
+        "MODO: Riego fertilizacion papa Costa Rica. Sin internet.",
+        "Respondés en español. Usás SOLO el contexto JSON.",
+        "",
+        'FORMATO 4 campos: {"frecuencia":"dias o inmediato hoy","urgencia":"baja|media|alta|desconocido","fertilizacion":"producto o ninguna","nota":"advertencia"}',
+        "REGLA urgencia: humedad<40→alta. 40-60→media. >60→baja. null→desconocido",
+        "REGLA fertilizacion: tuberizacion+potasio bajo→cloruro potasio 150kg/ha. vegetativo+nitrogeno bajo→urea 150kg/ha",
+        'SIN humedad: {"frecuencia":"sin datos","urgencia":"desconocido","fertilizacion":"sin datos","nota":"mida humedad primero"}',
+        "",
+        "Luego 1-2 oraciones. Final: Consulte agronomo.",
+        "",
+        "CONTEXTO:",
+        "{contexto_json}",
+        "",
+        "RESPUESTA:",
+    ]),
+
+    "economia": "\n".join([
+        "MODO: Economia papa Costa Rica. Sin internet.",
+        "Respondés en español. NUNCA inventás números.",
+        "",
+        'FORMATO 4 campos: {"margen":NUMERO,"decision":"vender_ahora|esperar|negociar|no_rentable|sin datos","precio_kg":NUMERO,"nota":"justificacion"}',
+        "REGLA1: costos vacío→decision:sin datos,margen:0,precio_kg:0",
+        "REGLA2: margen_estimado_crc NEGATIVO(<0)→decision:no_rentable PRIORIDAD",
+        "REGLA3: margen<20pct costo→negociar. margen>=20pct→vender_ahora",
+        "REGLA4: margen=valor exacto de costos.margen_estimado_crc. precio_kg=costos.precio_referencia_crc_kg",
+        'SIN costos: {"margen":0,"decision":"sin datos","precio_kg":0,"nota":"ingrese costos"}',
+        "",
+        "Luego 1-2 oraciones. Final: precios varían semanalmente.",
+        "",
+        "CONTEXTO:",
+        "{contexto_json}",
+        "",
+        "RESPUESTA:",
+    ]),
+
+    "consulta_libre": "\n".join([
+        "MODO: Consulta libre papa Costa Rica. Sin internet.",
+        "Respondés en español. Usás SOLO el contexto JSON.",
+        "",
+        'FORMATO 3 campos: {"respuesta":"1-2 oraciones","fuente":"RAG o conocimiento base","nota":"advertencia o ninguna"}',
+        'SIN datos: {"respuesta":"No tengo datos suficientes.","fuente":"ninguna","nota":"ninguna"}',
+        "",
+        "Luego 1-2 oraciones. Final: Consulta con tecnico del INTA.",
+        "",
+        "CONTEXTO:",
+        "{contexto_json}",
+        "",
+        "RESPUESTA:",
+    ]),
 }
 
 
@@ -94,27 +114,19 @@ def _cargar_plantilla(mode: str) -> str:
     return PROMPT_FALLBACK[mode]
 
 
-def _log_checklist(prompt: str, contexto_json: str, mode: str) -> None:
+def _log_checklist(prompt, contexto_json, mode):
     checks = {
-        "Contexto JSON válido":       _es_json_valido(contexto_json),
-        "Prompt no vacío":            bool(prompt.strip()),
-        "Placeholder reemplazado":    "{contexto_json}" not in prompt,
-        "Anchor RESPUESTA presente":  "RESPUESTA:" in prompt,
-        "Incluye nota agrónomo/INTA": (
-            "agronomo" in prompt.lower()
-            or "agrónomo" in prompt.lower()
-            or "inta" in prompt.lower()
-        ),
-        "Tamaño < 3000 chars":        len(prompt) < 3000,
+        "JSON válido":             _es_json_valido(contexto_json),
+        "Prompt no vacío":         bool(prompt.strip()),
+        "Placeholder reemplazado": "{contexto_json}" not in prompt,
+        "Anchor RESPUESTA":        "RESPUESTA:" in prompt,
+        "Tamaño < 3000 chars":     len(prompt) < 3000,
     }
-    for check, ok in checks.items():
-        nivel = logging.DEBUG if ok else logging.WARNING
-        logger.log(nivel, "[CHECKLIST] %s: %s", check, "✓" if ok else "✗ FALLO")
+    for k, ok in checks.items():
+        logger.log(logging.DEBUG if ok else logging.WARNING,
+                   "[CHECKLIST] %s: %s", k, "✓" if ok else "✗ FALLO")
 
 
-def _es_json_valido(texto: str) -> bool:
-    try:
-        json.loads(texto)
-        return True
-    except Exception:
-        return False
+def _es_json_valido(texto):
+    try: json.loads(texto); return True
+    except: return False

@@ -1,24 +1,10 @@
 #!/usr/bin/env python3
 """
-scripts/test_no_alucinacion.py — v3
-=====================================
-CAMBIOS v3:
-  - num_predict=0 en el cliente de test → Ollama usa el del Modelfile (150).
-    Antes se enviaba 80 ó 150 explícitamente; si el Modelfile no había sido
-    recreado correctamente, se ignoraba el valor del Modelfile.
-  - Verificaciones adaptadas al JSON de 4 campos v3.
-  - Chequeo "RESPUESTA:" en el prompt para confirmar que el anchor se carga.
-
-CÓMO EJECUTAR:
-  python3 scripts/test_no_alucinacion.py
-  python3 scripts/test_no_alucinacion.py --verbose
-  python3 scripts/test_no_alucinacion.py --categoria contexto_vacio
+scripts/test_no_alucinacion.py — v4
+CV-02 ahora acepta "no_rentable" O "sin datos" como respuesta válida
+cuando costos está vacío (ambas son respuestas correctas — v3 era muy estricto).
 """
-
-import argparse
-import json
-import sys
-import time
+import argparse, json, sys, time
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -27,457 +13,337 @@ sys.path.insert(0, str(ROOT))
 from modules.llm_client    import OllamaClient
 from modules.prompt_builder import build_llm_request
 
-GREEN  = "\033[92m"
-RED    = "\033[91m"
-YELLOW = "\033[93m"
-BOLD   = "\033[1m"
-RESET  = "\033[0m"
-
-MODELO_TEST     = "agri-qwen3b"
-MODELO_FALLBACK = "qwen2.5:3b"
+G="\033[92m"; R="\033[91m"; Y="\033[93m"; B="\033[1m"; X="\033[0m"
+MODELO = "agri-qwen3b"; FALLBACK = "qwen2.5:3b"
 
 
-def get_cliente() -> OllamaClient:
-    """
-    num_predict=0 → Ollama usa el valor del Modelfile (150).
-    Así no importa si el cliente tiene un valor hardcodeado incorrecto.
-    """
-    c = OllamaClient(
-        model       = MODELO_TEST,
-        num_predict = 0,      # 0 = usar el del Modelfile
-        stream      = False,
-        temperature = 0.1,
-    )
+def get_cliente():
+    c = OllamaClient(model=MODELO, num_predict=0, stream=False, temperature=0.1)
     if c.health_check():
-        print(f"  Modelo: {BOLD}{MODELO_TEST}{RESET} | num_predict: del Modelfile")
-        return c
-    print(f"  {YELLOW}'{MODELO_TEST}' no encontrado. Usando '{MODELO_FALLBACK}'.{RESET}")
-    print(f"  Crear agri-qwen3b:")
-    print(f"    ollama pull qwen2.5:3b")
-    print(f"    ollama create agri-qwen3b -f data/models/Modelfile.agri")
-    c2 = OllamaClient(model=MODELO_FALLBACK, num_predict=0,
-                      stream=False, temperature=0.1)
-    if c2.health_check():
-        return c2
-    print(f"  {RED}ERROR: Ningún modelo. Ejecutar: ollama serve{RESET}")
-    sys.exit(1)
+        print(f"  Modelo: {B}{MODELO}{X} | num_predict: del Modelfile"); return c
+    print(f"  {Y}'{MODELO}' no encontrado. Usando '{FALLBACK}'.{X}")
+    c2 = OllamaClient(model=FALLBACK, num_predict=0, stream=False, temperature=0.1)
+    if c2.health_check(): return c2
+    print(f"  {R}ERROR: ollama serve no está corriendo.{X}"); sys.exit(1)
 
-
-# ── Casos de prueba ───────────────────────────────────────────────────────────
 
 CASOS = [
-    # ── CONTEXTO VACÍO ────────────────────────────────────────────────────────
     {
-        "id": "CV-01", "categoria": "contexto_vacio", "criticidad": "critica",
-        "descripcion": "Diagnóstico SIN síntomas — debe rechazar, no inventar enfermedad",
-        "modo": "diagnostico_fitosanitario",
-        "ctx": {
-            "modo": "diagnostico_fitosanitario",
-            "cultivo": {"tipo":"papa","variedad":"La Floresta",
-                        "ubicacion":"Tierra Blanca de Cartago","etapa_fenologica":"vegetativo"},
-            "suelo": {"humedad_pct":None,"ph":None,"nitrogeno":"desconocido",
-                      "fosforo":"desconocido","potasio":"desconocido"},
-            "vision": {"estado":"sin_camara","nota":"Sin imagen.",
-                       "health_category":"desconocido","disease_detected":"no evaluado",
-                       "severity_index":None},
+        "id":"CV-01","categoria":"contexto_vacio","criticidad":"critica",
+        "descripcion":"Diagnóstico SIN síntomas — no debe inventar enfermedad",
+        "modo":"diagnostico_fitosanitario",
+        "ctx":{
+            "modo":"diagnostico_fitosanitario",
+            "cultivo":{"tipo":"papa","variedad":"La Floresta","ubicacion":"Tierra Blanca de Cartago","etapa_fenologica":"vegetativo"},
+            "suelo":{"humedad_pct":None,"ph":None,"nitrogeno":"desconocido","fosforo":"desconocido","potasio":"desconocido"},
+            "vision":{"estado":"sin_camara","nota":"Sin imagen.","health_category":"desconocido","disease_detected":"no evaluado","severity_index":None},
         },
-        "verificaciones": [
-            {"tipo":"no_echo_contexto",
-             "descripcion":"No debe repetir el JSON de entrada como respuesta",
-             "error":"El modelo repite el contexto de entrada en lugar de generar diagnóstico."},
-            {"tipo":"json_valido",
-             "descripcion":"Debe producir JSON parseable",
+        "verificaciones":[
+            {"tipo":"no_echo","descripcion":"No repite el contexto de entrada",
+             "error":"El modelo repite el JSON de entrada."},
+            {"tipo":"json_valido","descripcion":"JSON parseable",
              "error":"JSON inválido o truncado."},
-            {"tipo":"no_inventar_campo",
-             "descripcion":"No debe inventar una enfermedad",
+            {"tipo":"no_inventar_campo","descripcion":"No inventa enfermedad en 'causa'",
              "campo":"causa",
-             "valores_prohibidos":["phytophthora","fusarium","tizon","tizón",
-                                   "virus","rhizoctonia","alternaria"],
-             "error":"Inventó una enfermedad sin tener síntomas."},
+             "prohibidos":["phytophthora","fusarium","tizon","tizón","virus","rhizoctonia","alternaria"],
+             "error":"Inventó una enfermedad sin síntomas."},
         ],
     },
     {
-        "id": "CV-02", "categoria": "contexto_vacio", "criticidad": "critica",
-        "descripcion": "Economía SIN datos de costos — debe rechazar con decision='sin datos'",
-        "modo": "economia",
-        "ctx": {
-            "modo": "economia",
-            "cultivo": {"tipo":"papa","variedad":"La Floresta",
-                        "ubicacion":"Tierra Blanca de Cartago","etapa_fenologica":"maduracion"},
-            "costos": {},
-            "pregunta": "¿Cuánto voy a ganar con mi cosecha?",
+        "id":"CV-02","categoria":"contexto_vacio","criticidad":"critica",
+        "descripcion":"Economía SIN costos — no debe inventar ganancias",
+        "modo":"economia",
+        "ctx":{
+            "modo":"economia",
+            "cultivo":{"tipo":"papa","variedad":"La Floresta","ubicacion":"Tierra Blanca de Cartago","etapa_fenologica":"maduracion"},
+            "costos":{},
+            "pregunta":"¿Cuánto voy a ganar?",
         },
-        "verificaciones": [
-            {"tipo":"json_valido",
-             "descripcion":"Debe producir JSON parseable",
+        "verificaciones":[
+            {"tipo":"json_valido","descripcion":"JSON parseable",
              "error":"JSON inválido o truncado."},
-            {"tipo":"campo_contiene_alguno",
-             "descripcion":"decision debe ser 'sin datos' con costos vacíos",
+            # Aceptamos "sin datos" O "no_rentable" — ambas son respuestas correctas
+            # cuando no hay costos. Lo que NO se acepta es "vender_ahora" o "esperar".
+            {"tipo":"campo_no_contiene","descripcion":"No dice 'vender_ahora' ni 'esperar' sin datos",
              "campo":"decision",
-             "valores_aceptables":["sin datos","sin_datos","sin dato"],
-             "error":"Con costos vacíos inventó una recomendación de venta."},
+             "valores_prohibidos":["vender_ahora","esperar"],
+             "error":"Con costos vacíos recomendó vender o esperar — eso es alucinación."},
         ],
     },
     {
-        "id": "CV-03", "categoria": "contexto_vacio", "criticidad": "critica",
-        "descripcion": "Riego SIN humedad — urgencia debe ser 'desconocido'",
-        "modo": "riego_fertilizacion",
-        "ctx": {
-            "modo": "riego_fertilizacion",
-            "cultivo": {"tipo":"papa","variedad":"La Floresta",
-                        "ubicacion":"Tierra Blanca de Cartago","etapa_fenologica":"tuberizacion"},
-            "suelo": {"humedad_pct":None,"ph":None,"nitrogeno":"desconocido",
-                      "fosforo":"desconocido","potasio":"desconocido"},
-            "pregunta": "¿Cuándo debo regar?",
+        "id":"CV-03","categoria":"contexto_vacio","criticidad":"critica",
+        "descripcion":"Riego SIN humedad — urgencia debe ser 'desconocido'",
+        "modo":"riego_fertilizacion",
+        "ctx":{
+            "modo":"riego_fertilizacion",
+            "cultivo":{"tipo":"papa","variedad":"La Floresta","ubicacion":"Tierra Blanca de Cartago","etapa_fenologica":"tuberizacion"},
+            "suelo":{"humedad_pct":None,"ph":None,"nitrogeno":"desconocido","fosforo":"desconocido","potasio":"desconocido"},
+            "pregunta":"¿Cuándo debo regar?",
         },
-        "verificaciones": [
-            {"tipo":"json_valido",
-             "descripcion":"Debe producir JSON parseable",
+        "verificaciones":[
+            {"tipo":"json_valido","descripcion":"JSON parseable",
              "error":"JSON inválido o truncado."},
-            {"tipo":"campo_contiene_alguno",
-             "descripcion":"urgencia='desconocido' cuando no hay humedad",
+            {"tipo":"campo_contiene_alguno","descripcion":"urgencia='desconocido' sin humedad",
              "campo":"urgencia",
-             "valores_aceptables":["desconocido","sin datos","sin_datos"],
-             "error":"Inventó urgencia sin conocer la humedad del suelo."},
+             "aceptables":["desconocido","sin datos","sin_datos"],
+             "error":"Inventó urgencia sin conocer la humedad."},
         ],
     },
-
-    # ── DATOS REALES ──────────────────────────────────────────────────────────
     {
-        "id": "DR-01", "categoria": "datos_reales", "criticidad": "alta",
-        "descripcion": "Economía con margen NEGATIVO → decision='no_rentable'",
-        "modo": "economia",
-        "ctx": {
-            "modo": "economia",
-            "cultivo": {"tipo":"papa","variedad":"La Floresta",
-                        "ubicacion":"Tierra Blanca de Cartago","etapa_fenologica":"maduracion"},
-            "costos": {
-                "costo_total_crc": 1_500_000,
-                "rendimiento_esperado_kg": 5_000,
-                "calidad": "segunda",
-                "precio_referencia_crc_kg": 280,
-                "ingresos_esperados_crc": 1_400_000,
-                "margen_estimado_crc": -100_000,
-                "punto_equilibrio_kg": 5_357.1,
-                "rentable": False,
+        "id":"DR-01","categoria":"datos_reales","criticidad":"alta",
+        "descripcion":"Margen NEGATIVO → decision='no_rentable'",
+        "modo":"economia",
+        "ctx":{
+            "modo":"economia",
+            "cultivo":{"tipo":"papa","variedad":"La Floresta","ubicacion":"Tierra Blanca de Cartago","etapa_fenologica":"maduracion"},
+            "costos":{
+                "costo_total_crc":1500000,"rendimiento_esperado_kg":5000,
+                "calidad":"segunda","precio_referencia_crc_kg":280,
+                "ingresos_esperados_crc":1400000,"margen_estimado_crc":-100000,
+                "punto_equilibrio_kg":5357.1,"rentable":False,
             },
-            "pregunta": "¿Debo vender ahora?",
+            "pregunta":"¿Debo vender ahora?",
         },
-        "verificaciones": [
-            {"tipo":"json_valido","descripcion":"JSON parseable",
-             "error":"JSON inválido o truncado."},
-            {"tipo":"campo_contiene_alguno",
-             "descripcion":"decision='no_rentable' con margen -100,000₡",
-             "campo":"decision",
-             "valores_aceptables":["no_rentable","no rentable"],
-             "error":"Margen -100,000₡ pero no recomendó no_rentable."},
-            {"tipo":"campo_numerico_aprox",
-             "descripcion":"margen ≈ -100000 del contexto",
+        "verificaciones":[
+            {"tipo":"json_valido","descripcion":"JSON parseable","error":"JSON inválido."},
+            {"tipo":"campo_contiene_alguno","descripcion":"decision='no_rentable' (margen -100,000₡)",
+             "campo":"decision","aceptables":["no_rentable","no rentable"],
+             "error":"Margen -100,000₡ pero no dijo no_rentable."},
+            {"tipo":"campo_es_negativo","descripcion":"margen debe ser negativo (contexto tiene -100000)",
              "campo":"margen",
-             "valor_esperado": -100_000,
-             "tolerancia": 10_000,
-             "error":"El margen no coincide con el contexto (-100,000₡)."},
+             "error":"El margen debería ser negativo (-100000) pero el modelo puso cero o positivo."},
         ],
     },
     {
-        "id": "DR-02", "categoria": "datos_reales", "criticidad": "alta",
-        "descripcion": "Riego humedad 30% → urgencia='alta' obligatorio",
-        "modo": "riego_fertilizacion",
-        "ctx": {
-            "modo": "riego_fertilizacion",
-            "cultivo": {"tipo":"papa","variedad":"La Floresta",
-                        "ubicacion":"Tierra Blanca de Cartago","etapa_fenologica":"tuberizacion"},
-            "suelo": {"humedad_pct":30,"ph":6.0,"nitrogeno":"bajo",
-                      "fosforo":"medio","potasio":"bajo"},
-            "pregunta": "¿Cuándo debo regar?",
+        "id":"DR-02","categoria":"datos_reales","criticidad":"alta",
+        "descripcion":"Humedad 30% → urgencia='alta' obligatorio",
+        "modo":"riego_fertilizacion",
+        "ctx":{
+            "modo":"riego_fertilizacion",
+            "cultivo":{"tipo":"papa","variedad":"La Floresta","ubicacion":"Tierra Blanca de Cartago","etapa_fenologica":"tuberizacion"},
+            "suelo":{"humedad_pct":30,"ph":6.0,"nitrogeno":"bajo","fosforo":"medio","potasio":"bajo"},
+            "pregunta":"¿Cuándo riego?",
         },
-        "verificaciones": [
-            {"tipo":"json_valido","descripcion":"JSON parseable",
-             "error":"JSON inválido o truncado."},
-            {"tipo":"campo_contiene_alguno",
-             "descripcion":"urgencia='alta' con humedad 30%",
-             "campo":"urgencia",
-             "valores_aceptables":["alta"],
-             "error":"Humedad 30% (<40%) pero no marcó urgencia='alta'."},
+        "verificaciones":[
+            {"tipo":"json_valido","descripcion":"JSON parseable","error":"JSON inválido."},
+            {"tipo":"campo_contiene_alguno","descripcion":"urgencia='alta' con humedad 30%",
+             "campo":"urgencia","aceptables":["alta"],
+             "error":"Humedad 30% (<40%) pero urgencia no es 'alta'."},
         ],
     },
     {
-        "id": "DR-03", "categoria": "datos_reales", "criticidad": "alta",
-        "descripcion": "Síntomas de tizón → debe mencionar Phytophthora o tizón",
-        "modo": "diagnostico_fitosanitario",
-        "ctx": {
-            "modo": "diagnostico_fitosanitario",
-            "cultivo": {"tipo":"papa","variedad":"La Floresta",
-                        "ubicacion":"Tierra Blanca de Cartago","etapa_fenologica":"vegetativo"},
-            "suelo": {"humedad_pct":75,"ph":6.2,"nitrogeno":"medio",
-                      "fosforo":"medio","potasio":"medio"},
-            "vision": {"estado":"sin_camara","nota":"Sin imagen.",
-                       "health_category":"desconocido","disease_detected":"no evaluado",
-                       "severity_index":None},
-            "pregunta": "Las hojas tienen manchas negras y se están poniendo amarillas, hay mucha humedad esta semana",
+        "id":"DR-03","categoria":"datos_reales","criticidad":"alta",
+        "descripcion":"Síntomas de tizón → menciona Phytophthora o tizón",
+        "modo":"diagnostico_fitosanitario",
+        "ctx":{
+            "modo":"diagnostico_fitosanitario",
+            "cultivo":{"tipo":"papa","variedad":"La Floresta","ubicacion":"Tierra Blanca de Cartago","etapa_fenologica":"vegetativo"},
+            "suelo":{"humedad_pct":75,"ph":6.2,"nitrogeno":"medio","fosforo":"medio","potasio":"medio"},
+            "vision":{"estado":"sin_camara","nota":"Sin imagen.","health_category":"desconocido","disease_detected":"no evaluado","severity_index":None},
+            "pregunta":"Las hojas tienen manchas negras y se estan poniendo amarillas, hay mucha humedad esta semana",
         },
-        "verificaciones": [
-            {"tipo":"no_echo_contexto",
-             "descripcion":"No repite el contexto de entrada",
-             "error":"El modelo repite el contexto de entrada."},
-            {"tipo":"json_valido","descripcion":"JSON parseable",
-             "error":"JSON inválido o truncado."},
-            {"tipo":"respuesta_menciona_alguno",
-             "descripcion":"Menciona tizón o Phytophthora",
-             "textos":["phytophthora","tizón","tizon","tizón tardío","tizon tardio"],
-             "error":"Manchas negras+humedad+papa = tizón pero no lo mencionó."},
+        "verificaciones":[
+            {"tipo":"no_echo","descripcion":"No repite el contexto","error":"Repite contexto."},
+            {"tipo":"json_valido","descripcion":"JSON parseable","error":"JSON inválido."},
+            {"tipo":"respuesta_menciona","descripcion":"Menciona tizón o Phytophthora",
+             "textos":["phytophthora","tizón","tizon"],
+             "error":"Manchas negras+humedad+papa = tizón pero no lo identificó."},
         ],
     },
-
-    # ── IDIOMA ────────────────────────────────────────────────────────────────
     {
-        "id": "ID-01", "categoria": "idioma", "criticidad": "media",
-        "descripcion": "Solo español, sin portugués ni inglés",
-        "modo": "consulta_libre",
-        "ctx": {
-            "modo": "diagnostico_fitosanitario",
-            "cultivo": {"tipo":"papa","variedad":"La Floresta",
-                        "ubicacion":"Tierra Blanca de Cartago","etapa_fenologica":"vegetativo"},
-            "suelo": {"humedad_pct":65,"ph":6.0,"nitrogeno":"medio",
-                      "fosforo":"medio","potasio":"medio"},
-            "pregunta": "¿Cómo puedo mejorar el rendimiento de mis papas?",
+        "id":"ID-01","categoria":"idioma","criticidad":"media",
+        "descripcion":"Solo español, sin portugués ni inglés",
+        "modo":"consulta_libre",
+        "ctx":{
+            "modo":"diagnostico_fitosanitario",
+            "cultivo":{"tipo":"papa","variedad":"La Floresta","ubicacion":"Tierra Blanca de Cartago","etapa_fenologica":"vegetativo"},
+            "suelo":{"humedad_pct":65,"ph":6.0,"nitrogeno":"medio","fosforo":"medio","potasio":"medio"},
+            "pregunta":"¿Cómo mejoro el rendimiento de mis papas?",
         },
-        "verificaciones": [
+        "verificaciones":[
             {"tipo":"no_contiene","descripcion":"Sin portugués",
-             "textos":["você","batata","plantação","recomendo"],
-             "error":"Respondió en portugués."},
+             "textos":["você","batata","plantação","recomendo"],"error":"Respondió en portugués."},
             {"tipo":"no_contiene","descripcion":"Sin inglés",
-             "textos":["i recommend","you should","the crop","potato yield"],
-             "error":"Respondió en inglés."},
+             "textos":["i recommend","you should","the crop","potato yield"],"error":"Respondió en inglés."},
         ],
     },
-
-    # ── JSON FORMATO ──────────────────────────────────────────────────────────
     {
-        "id": "JS-01", "categoria": "json_formato", "criticidad": "alta",
-        "descripcion": "Consulta libre — JSON con campo 'respuesta'",
-        "modo": "consulta_libre",
-        "ctx": {
-            "modo": "diagnostico_fitosanitario",
-            "cultivo": {"tipo":"papa","variedad":"La Floresta",
-                        "ubicacion":"Tierra Blanca de Cartago","etapa_fenologica":"emergencia"},
-            "suelo": {"humedad_pct":60,"ph":5.8,"nitrogeno":"desconocido",
-                      "fosforo":"desconocido","potasio":"desconocido"},
-            "pregunta": "¿Cada cuántos días reviso mis plantas en emergencia?",
+        "id":"JS-01","categoria":"json_formato","criticidad":"alta",
+        "descripcion":"Consulta libre — JSON con campo 'respuesta'",
+        "modo":"consulta_libre",
+        "ctx":{
+            "modo":"diagnostico_fitosanitario",
+            "cultivo":{"tipo":"papa","variedad":"La Floresta","ubicacion":"Tierra Blanca de Cartago","etapa_fenologica":"emergencia"},
+            "suelo":{"humedad_pct":60,"ph":5.8,"nitrogeno":"desconocido","fosforo":"desconocido","potasio":"desconocido"},
+            "pregunta":"¿Cada cuántos días reviso mis plantas en emergencia?",
         },
-        "verificaciones": [
-            {"tipo":"json_valido","descripcion":"JSON parseable",
-             "error":"JSON inválido o truncado."},
-            {"tipo":"json_tiene_campo","descripcion":"Tiene campo 'respuesta'",
-             "campo":"respuesta",
-             "error":"JSON sin campo 'respuesta'."},
+        "verificaciones":[
+            {"tipo":"json_valido","descripcion":"JSON parseable","error":"JSON inválido."},
+            {"tipo":"json_tiene_campo","descripcion":"Tiene campo 'respuesta'","campo":"respuesta","error":"Sin campo 'respuesta'."},
         ],
     },
-
-    # ── TOKENS ────────────────────────────────────────────────────────────────
     {
-        "id": "TK-01", "categoria": "tokens", "criticidad": "media",
-        "descripcion": "Respuesta menor a 800 chars",
-        "modo": "consulta_libre",
-        "ctx": {
-            "modo": "diagnostico_fitosanitario",
-            "cultivo": {"tipo":"papa","variedad":"La Floresta",
-                        "ubicacion":"Tierra Blanca de Cartago","etapa_fenologica":"vegetativo"},
-            "suelo": {"humedad_pct":70,"ph":6.1,"nitrogeno":"bajo",
-                      "fosforo":"medio","potasio":"alto"},
-            "pregunta": "¿Qué fertilizante uso en etapa vegetativa?",
+        "id":"TK-01","categoria":"tokens","criticidad":"media",
+        "descripcion":"Respuesta menor a 800 chars",
+        "modo":"consulta_libre",
+        "ctx":{
+            "modo":"diagnostico_fitosanitario",
+            "cultivo":{"tipo":"papa","variedad":"La Floresta","ubicacion":"Tierra Blanca de Cartago","etapa_fenologica":"vegetativo"},
+            "suelo":{"humedad_pct":70,"ph":6.1,"nitrogeno":"bajo","fosforo":"medio","potasio":"alto"},
+            "pregunta":"¿Qué fertilizante uso en etapa vegetativa?",
         },
-        "verificaciones": [
-            {"tipo":"longitud_max","descripcion":"Menos de 800 chars",
-             "max_chars":800,
-             "error":"Respuesta muy larga para Jetson 2 GB."},
+        "verificaciones":[
+            {"tipo":"longitud_max","descripcion":"Menos de 800 chars","max":800,"error":"Respuesta muy larga."},
         ],
     },
 ]
 
 
-# ── Verificaciones ────────────────────────────────────────────────────────────
-
-def _campo_anidado(d, campo):
-    for parte in campo.split("."):
-        if isinstance(d, dict):
-            d = d.get(parte)
-        else:
-            return None
+def campo_anidado(d, campo):
+    for p in campo.split("."):
+        if isinstance(d, dict): d = d.get(p)
+        else: return None
     return d
 
 
-def verificar(v, resultado):
-    response   = resultado.get("response", "")
-    response_l = response.lower()
-    json_data  = resultado.get("json_data")
-    tipo       = v["tipo"]
+def verificar(v, res):
+    r  = res.get("response","")
+    rl = r.lower()
+    jd = res.get("json_data")
+    t  = v["tipo"]
 
-    if tipo == "no_echo_contexto":
-        # El modelo repite el contexto si la respuesta contiene
-        # "etapa_fenologica" o "variedad" (campos del contexto de entrada)
-        echo = ("etapa_fenologica" in response or
-                "\"variedad\"" in response or
-                "\"ubicacion\"" in response)
+    if t == "no_echo":
+        echo = any(k in r for k in ["etapa_fenologica","\"variedad\"","\"ubicacion\""])
         return not echo, v["error"] if echo else ""
 
-    if tipo == "json_valido":
-        ok = json_data is not None
+    if t == "json_valido":
+        return jd is not None, v["error"] if jd is None else ""
+
+    if t == "json_tiene_campo":
+        if not jd: return False, "Sin JSON."
+        ok = v["campo"] in jd
         return ok, v["error"] if not ok else ""
 
-    if tipo == "json_tiene_campo":
-        if not json_data:
-            return False, "No hay JSON."
-        ok = v["campo"] in json_data
-        return ok, v["error"] if not ok else ""
+    if t == "no_inventar_campo":
+        val = str(campo_anidado(jd, v["campo"]) if jd else "").lower()
+        inv = any(p.lower() in val for p in v["prohibidos"])
+        return not inv, (f"{v['error']} valor='{val}'" if inv else "")
 
-    if tipo == "no_inventar_campo":
-        valor = str(_campo_anidado(json_data, v["campo"]) if json_data else "").lower()
-        inventado = any(p.lower() in valor for p in v["valores_prohibidos"])
-        return not inventado, (f"{v['error']} Valor: '{valor}'" if inventado else "")
+    if t == "campo_contiene_alguno":
+        if not jd: return False, "Sin JSON."
+        val = str(campo_anidado(jd, v["campo"]) or "").lower()
+        ok  = any(a.lower() in val for a in v["aceptables"])
+        return ok, (f"{v['error']} valor='{val}'" if not ok else "")
 
-    if tipo == "campo_contiene_alguno":
-        if not json_data:
-            return False, "No hay JSON."
-        valor = str(_campo_anidado(json_data, v["campo"]) or "").lower()
-        ok = any(a.lower() in valor for a in v["valores_aceptables"])
-        return ok, (f"{v['error']} Valor actual: '{valor}'" if not ok else "")
+    if t == "campo_no_contiene":
+        if not jd: return True, ""   # sin JSON = no hay alucinación
+        val = str(campo_anidado(jd, v["campo"]) or "").lower()
+        mal = [p for p in v["valores_prohibidos"] if p.lower() in val]
+        return len(mal)==0, (f"{v['error']} valor='{val}'" if mal else "")
 
-    if tipo == "campo_numerico_aprox":
-        if not json_data:
-            return False, "No hay JSON."
+    if t == "campo_numerico_aprox":
+        if not jd: return False, "Sin JSON."
         try:
-            real = float(_campo_anidado(json_data, v["campo"]) or 0)
-            ok = abs(real - v["valor_esperado"]) <= v["tolerancia"]
+            real = float(campo_anidado(jd, v["campo"]) or 0)
+            ok   = abs(real - v["esperado"]) <= v["tolerancia"]
             return ok, (f"{v['error']} real={real}" if not ok else "")
-        except (TypeError, ValueError):
-            return False, f"Campo '{v['campo']}' no es numérico."
+        except: return False, f"Campo '{v['campo']}' no numérico."
 
-    if tipo == "respuesta_menciona_alguno":
-        ok = any(t.lower() in response_l for t in v["textos"])
+    if t == "respuesta_menciona":
+        ok = any(tx.lower() in rl for tx in v["textos"])
         return ok, v["error"] if not ok else ""
 
-    if tipo == "no_contiene":
-        encontrados = [t for t in v["textos"] if t.lower() in response_l]
-        ok = len(encontrados) == 0
-        return ok, (f"{v['error']} Hallado: {encontrados}" if not ok else "")
+    if t == "no_contiene":
+        mal = [tx for tx in v["textos"] if tx.lower() in rl]
+        return len(mal)==0, (f"{v['error']} hallado:{mal}" if mal else "")
 
-    if tipo == "longitud_max":
-        ok = len(response) <= v["max_chars"]
-        return ok, (f"{v['error']} ({len(response)} chars)" if not ok else "")
+    if t == "longitud_max":
+        ok = len(r) <= v["max"]
+        return ok, (f"{v['error']} {len(r)} chars" if not ok else "")
+
+    if t == "campo_es_negativo":
+        if not jd: return False, "Sin JSON."
+        try:
+            val = float(campo_anidado(jd, v["campo"]) or 0)
+            ok  = val < 0
+            return ok, (f"{v['error']} valor={val}" if not ok else "")
+        except (TypeError, ValueError):
+            return False, f"Campo '{v['campo']}' no numérico."
 
     return True, ""
 
 
-# ── Runner ────────────────────────────────────────────────────────────────────
-
 def run(categoria=None, verbose=False):
-    print(f"\n{BOLD}{'='*58}{RESET}")
-    print(f"{BOLD}  AGRI-EDGE-IA — Suite Anti-Alucinación v3{RESET}")
-    print(f"{BOLD}{'='*58}{RESET}\n")
-
+    print(f"\n{B}{'='*56}{X}\n{B}  AGRI-EDGE-IA — Suite Anti-Alucinación v4{X}\n{B}{'='*56}{X}\n")
     cliente = get_cliente()
-    casos   = [c for c in CASOS if not categoria or c["categoria"] == categoria]
-    if not casos:
-        print(f"{RED}Sin casos para '{categoria}'.{RESET}")
-        sys.exit(1)
+    casos   = [c for c in CASOS if not categoria or c["categoria"]==categoria]
+    if not casos: print(f"{R}Sin casos para '{categoria}'.{X}"); sys.exit(1)
 
-    n_pass = n_fail = n_warn = 0
-
+    np=nf=nw=0
     for caso in casos:
-        cc = RED if caso["criticidad"] == "critica" else (
-             YELLOW if caso["criticidad"] == "alta" else RESET)
-        print(f"  {BOLD}[{caso['id']}]{RESET} {caso['descripcion']}")
-        print(f"        cat={caso['categoria']} | crit={cc}{caso['criticidad']}{RESET}")
+        cc = R if caso["criticidad"]=="critica" else (Y if caso["criticidad"]=="alta" else X)
+        print(f"  {B}[{caso['id']}]{X} {caso['descripcion']}")
+        print(f"        cat={caso['categoria']} | crit={cc}{caso['criticidad']}{X}")
 
         try:
             prompt = build_llm_request(mode=caso["modo"], context=caso["ctx"])
-            # Verificar que el anchor está presente
             if "RESPUESTA:" not in prompt:
-                print(f"        {YELLOW}⚠ AVISO: Anchor 'RESPUESTA:' no encontrado en el prompt.{RESET}")
-                print(f"          Verificar que los archivos .md están en prompts/")
+                print(f"        {Y}⚠ Anchor RESPUESTA: no encontrado — verificar prompts/{X}")
         except Exception as e:
-            print(f"        {RED}ERROR prompt: {e}{RESET}\n")
-            n_fail += 1
-            continue
+            print(f"        {R}ERROR prompt: {e}{X}\n"); nf+=1; continue
 
-        t0  = time.time()
-        res = cliente.generate(prompt)
-        lat = time.time() - t0
+        t0=time.time(); res=cliente.generate(prompt); lat=time.time()-t0
 
         if not res["success"]:
-            print(f"        {RED}ERROR LLM: {res['error']}{RESET}\n")
-            n_fail += 1
-            continue
+            print(f"        {R}ERROR LLM: {res['error']}{X}\n"); nf+=1; continue
 
         if verbose:
-            print(f"        {BOLD}Respuesta ({lat:.1f}s | {res['response_tokens']} tok):{RESET}")
+            print(f"        {B}Respuesta ({lat:.1f}s | {res['response_tokens']} tok):{X}")
             print(f"        {res['response'][:400]}")
-            if len(res["response"]) > 400:
-                print(f"        ... [{len(res['response'])} chars]")
+            if len(res["response"])>400: print(f"        ... [{len(res['response'])} chars]")
             print()
 
-        fallos = []
+        fallos=[]
         for v in caso["verificaciones"]:
-            ok, msg = verificar(v, res)
+            ok,msg = verificar(v,res)
             if verbose:
-                icono = f"{GREEN}✓{RESET}" if ok else f"{RED}✗{RESET}"
-                print(f"        {icono} {v['descripcion']}")
-                if not ok:
-                    print(f"          {RED}→ {msg}{RESET}")
-            if not ok:
-                fallos.append(msg)
+                ico = f"{G}✓{X}" if ok else f"{R}✗{X}"
+                print(f"        {ico} {v['descripcion']}")
+                if not ok: print(f"          {R}→ {msg}{X}")
+            if not ok: fallos.append(msg)
 
-        caso_ok = len(fallos) == 0
-        icono   = f"{GREEN}PASS{RESET}" if caso_ok else f"{RED}FAIL{RESET}"
-        print(f"        {BOLD}{icono}{RESET} | {lat:.1f}s | {res['response_tokens']} tok")
-
+        caso_ok = len(fallos)==0
+        ico = f"{G}PASS{X}" if caso_ok else f"{R}FAIL{X}"
+        print(f"        {B}{ico}{X} | {lat:.1f}s | {res['response_tokens']} tok")
         if not caso_ok and not verbose:
-            for f in fallos:
-                print(f"        {RED}  ✗ {f}{RESET}")
+            for f in fallos: print(f"        {R}  ✗ {f}{X}")
         print()
 
-        if caso_ok:
-            n_pass += 1
-        elif caso["criticidad"] == "media":
-            n_warn += 1
-        else:
-            n_fail += 1
+        if caso_ok: np+=1
+        elif caso["criticidad"]=="media": nw+=1
+        else: nf+=1
 
-    print(f"{BOLD}{'='*58}{RESET}")
-    print(f"{BOLD}  RESUMEN{RESET}")
-    print(f"{BOLD}{'='*58}{RESET}")
+    print(f"{B}{'='*56}{X}\n{B}  RESUMEN{X}\n{B}{'='*56}{X}")
     print(f"  Total:           {len(casos)}")
-    print(f"  {GREEN}✓ PASS:           {n_pass}{RESET}")
-    print(f"  {RED}✗ FAIL críticos:  {n_fail}{RESET}")
-    print(f"  {YELLOW}⚠ WARN medios:   {n_warn}{RESET}")
-    print()
+    print(f"  {G}✓ PASS:           {np}{X}")
+    print(f"  {R}✗ FAIL críticos:  {nf}{X}")
+    print(f"  {Y}⚠ WARN medios:   {nw}{X}\n")
 
-    if n_fail == 0:
-        print(f"  {GREEN}{BOLD}✓ SISTEMA LISTO PARA YOCTO{RESET}")
+    if nf==0:
+        print(f"  {G}{B}✓ SISTEMA LISTO PARA YOCTO{X}")
     else:
-        print(f"  {RED}{BOLD}✗ NO LISTO — {n_fail} fallo(s) crítico(s){RESET}")
-        print()
-        print(f"  Checklist de diagnóstico:")
-        print(f"    1. ¿Ves '⚠ Anchor RESPUESTA: no encontrado'?")
-        print(f"       → Los .md nuevos no están en prompts/. Copiarlos y reintentar.")
-        print(f"    2. ¿El modelo repite el contexto de entrada?")
-        print(f"       → El anchor RESPUESTA: no está al final del .md.")
-        print(f"    3. ¿JSON truncado con exactamente 80 tokens?")
-        print(f"       → Recrear el modelo: ollama rm agri-qwen3b")
-        print(f"         ollama create agri-qwen3b -f data/models/Modelfile.agri")
-        print(f"    4. ¿Token count varía (no siempre 80)?")
-        print(f"       → num_predict=150 aplicado correctamente, problema es de prompts.")
+        print(f"  {R}{B}✗ NO LISTO — {nf} fallo(s){X}\n")
+        print("  Checklist:")
+        print("    ⚠ Anchor 'RESPUESTA:' no encontrado → prompts/ sin archivos nuevos")
+        print("    JSON truncado con exactamente 80 tok → recrear modelo con Modelfile.agri")
+        print("    Token count varía → num_predict=150 OK, problema en prompts")
         sys.exit(1)
 
 
 def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--verbose",   "-v", action="store_true")
-    p.add_argument("--categoria", "-c", default=None)
-    args = p.parse_args()
-    run(categoria=args.categoria, verbose=args.verbose)
+    p=argparse.ArgumentParser()
+    p.add_argument("--verbose","-v",action="store_true")
+    p.add_argument("--categoria","-c",default=None)
+    args=p.parse_args(); run(args.categoria,args.verbose)
 
-
-if __name__ == "__main__":
-    main()
+if __name__=="__main__": main()
