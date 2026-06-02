@@ -403,6 +403,13 @@ sqlite3 data/db/agri_edge.db \
 
 ---
 
+lo que debe ir en docker necesario:
+Para el Jetson Nano esto se resuelve agregando al Dockerfile o a la receta Yocto:
+apt-get install -y libportaudio2
+
+pip install onnxruntime
+
+sudo apt-get install espeak-ng
 ## Equipo
 
 | Rol | Integrante |

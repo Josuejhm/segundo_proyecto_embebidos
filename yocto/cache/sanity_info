@@ -1,0 +1,4 @@
+SANITY_VERSION 1
+TMPDIR /yocto/build/tmp
+SSTATE_DIR /yocto/sstate
+NATIVELSBSTRING ubuntu-22.04

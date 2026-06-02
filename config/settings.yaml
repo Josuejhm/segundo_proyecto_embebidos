@@ -1,0 +1,74 @@
+# AGRI-EDGE-IA — Configuración global
+# Cambiar 'entorno' para activar ajustes específicos: local | jetson
+
+entorno: "local"
+
+# ── Modelo LLM ──────────────────────────────────────────────────────────────
+ollama:
+  host: "http://localhost:11434"
+  model: "qwen2.5:3b"
+  timeout: 150
+  num_predict: 300        # CAMBIO: era 300 → 150 máximo 
+                          # Razón: 300 tok a 3-6 tok/s en Jetson = hasta 100s (viola RNF-012)
+                          # 150 tok es suficiente para diagnósticos agrícolas concisos
+  temperature: 0.1
+  stream: true
+
+# ── Overrides para Jetson Nano ───────────────────────────────────────────────
+jetson_overrides:
+  timeout: 120
+  num_predict: 200       # CAMBIO: era 200 → 120 en Jetson
+                          # Razón: 120 tok a 4 tok/s = 30s (justo en el límite del RNF)
+  temperature: 0.1
+  stream: true
+
+# ── RAG ─────────────────────────────────────────────────────────────────────
+rag:
+  habilitado: true
+  index_path: "rag/index"
+  model_name: "all-MiniLM-L6-v2"
+  n_resultados: 2
+
+# ── Base de datos ────────────────────────────────────────────────────────────
+base_datos:
+  path: "data/db/agri_edge.db"
+
+# ── Cultivo por defecto ──────────────────────────────────────────────────────
+cultivo:
+  tipo: "papa"
+  variedad: "La Floresta"
+  ubicacion: "Tierra Blanca de Cartago, Costa Rica"
+
+# ── Visión ───────────────────────────────────────────────────────────────────
+vision:
+  mock_enabled: true           # CAMBIO CRÍTICO: era true → false
+                                # Con true el sistema ignora la cámara y devuelve
+                                # datos inventados siempre. Nunca llegarías a probar
+                                # el sistema real.
+  model_path: "data/models/mobilenetv2_potato.onnx"
+  camera_source: "auto"         # "auto" → CSI en Jetson, USB en PC de desarrollo
+                                # Para forzar USB en pruebas: "0"
+                                # Para forzar un archivo de imagen: "data/samples/test.jpg"
+  confidence_threshold: 0.60   # Confianza mínima para aceptar el diagnóstico CNN
+  save_captures: true           # Guardar imagen de cada diagnóstico en data/images/
+
+# ── Audio STT (voz → texto) ──────────────────────────────────────────────────
+# SECCIÓN NUEVA — input_handler.py la necesita para saber qué binario usar
+whisper:
+  bin_path: "/usr/local/bin/whisper-cpp"  # Ruta del binario compilado
+  model_path: "data/models/ggml-tiny.bin" # tiny=75MB (rápido), base=145MB (mejor español)
+  language: "es"
+  duracion_grabacion_seg: 5               # Segundos que graba el micrófono
+  samplerate: 16000
+
+# ── Audio TTS (texto → voz) ──────────────────────────────────────────────────
+# SECCIÓN NUEVA — input_handler.py necesita saber si TTS está habilitado
+piper:
+  habilitado: true
+  model_path: "data/models/es_ES-davefx-medium.onnx"  # Voz en español
+  bin_path: "/usr/local/bin/piper"
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+logs:
+  path: "data/agri_edge.log"
+  level: "INFO"

@@ -1,0 +1,76 @@
+# =============================================================================
+# config/settings.yaml — AGRI-EDGE-IA configuración para Jetson Nano
+# =============================================================================
+# Reemplaza el settings.yaml del repo para modo producción en Jetson
+# ---------------------------------------------------------------------------
+
+# "jetson" activa los overrides de rendimiento de abajo
+entorno: "jetson"
+
+# ── Modelo LLM (Ollama) ──────────────────────────────────────────────────────
+ollama:
+  host: "http://localhost:11434"
+  model: "qwen2.5:3b"
+  timeout: 150
+  num_predict: 200
+  temperature: 0.1
+  stream: true
+
+# ── Overrides para Jetson Nano ───────────────────────────────────────────────
+jetson_overrides:
+  timeout: 120
+  num_predict: 150
+  temperature: 0.1
+  stream: true
+
+# ── RAG ─────────────────────────────────────────────────────────────────────
+rag:
+  habilitado: true
+  index_path: "/opt/agri-edge-ia/rag/index"
+  model_name: "all-MiniLM-L6-v2"
+  n_resultados: 2
+
+# ── Base de datos ────────────────────────────────────────────────────────────
+base_datos:
+  path: "/var/lib/agri-edge/db/agri_edge.db"
+
+# ── Cultivo ──────────────────────────────────────────────────────────────────
+cultivo:
+  tipo: "papa"
+  variedad: "La Floresta"
+  ubicacion: "Tierra Blanca de Cartago, Costa Rica"
+
+# ── Visión ───────────────────────────────────────────────────────────────────
+vision:
+  # En Jetson: false = usa cámara CSI real + modelo ONNX
+  mock_enabled: false
+  model_path: "/opt/agri-edge-ia/data/models/mobilenetv2_potato.onnx"
+  camera_source: "auto"        # "auto" intenta CSI primero, cae a USB
+  confidence_threshold: 0.60
+  save_captures: true
+
+# ── Audio STT — whisper.cpp ──────────────────────────────────────────────────
+whisper:
+  bin_path: "/usr/local/bin/whisper-cpp"
+  model_path: "/opt/agri-edge-ia/data/models/ggml-tiny.bin"
+  language: "es"
+  duracion_grabacion_seg: 5
+  samplerate: 16000
+
+# ── Audio TTS — espeak-ng (instalado en imagen, 0 dependencias) ──────────────
+# Nota: se usa espeak-ng (instalado en la imagen Yocto) no piper-tts
+# porque piper-tts es más difícil de empaquetar para ARM64 sin pip
+espeak:
+  habilitado: true
+  language: "es"
+
+# Piper: mantenemos la sección pero deshabilitado para Jetson
+piper:
+  habilitado: false
+  model_path: "/opt/agri-edge-ia/data/models/es_ES-davefx-medium.onnx"
+  bin_path: "/usr/local/bin/piper"
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+logs:
+  path: "/var/log/agri-edge/agri_edge.log"
+  level: "INFO"

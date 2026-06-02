@@ -1,0 +1,42 @@
+# ── Entorno Python ──────────────────────────────────────────────
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# ── Base de datos ────────────────────────────────────────────────
+data/db/*.db
+data/db/*.db-shm
+data/db/*.db-wal
+
+# ── Modelos LLM (demasiado grandes para Git) ─────────────────────
+*.gguf
+*.bin
+*.safetensors
+data/models/
+
+# ── Logs ─────────────────────────────────────────────────────────
+*.log
+data/*.log
+
+# ── Imágenes de prueba y datos sensibles ─────────────────────────
+data/images/*
+data/samples/*
+!data/images/.gitkeep
+!data/samples/.gitkeep
+
+# ── Variables de entorno ─────────────────────────────────────────
+.env
+.env.local
+
+# ── Sistema operativo ────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── IDEs ─────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp*.pyc
